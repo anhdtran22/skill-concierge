@@ -355,10 +355,11 @@ _PURITY_BODY = (
 
 def test_purity_shadow_keeps_everything_but_logs(tmp_path, monkeypatch, caplog):
     # SHADOW (default): index is byte-identical to today — impure phrases stay,
-    # would-drops are only LOGGED as (skill, phrase).
+    # would-drops are only LOGGED as (skill, phrase), at DEBUG (one INFO summary per
+    # discovery pass instead; see the next test).
     monkeypatch.setattr(sd, "SKILL_TRIGGER_PURITY", "shadow")
     import logging
-    with caplog.at_level(logging.INFO, logger="skill_search"):
+    with caplog.at_level(logging.DEBUG, logger="skill_search"):
         s = sd.parse_skill(make_skill(tmp_path, "net", body=_PURITY_BODY))
     trigs = s["body_triggers"]
     assert "Setting up VLANs on a home network for the first time" in trigs
@@ -368,6 +369,25 @@ def test_purity_shadow_keeps_everything_but_logs(tmp_path, monkeypatch, caplog):
     assert "would-drop" in logged and "'net'" in logged
     assert "pipeline" in logged and "Scaffold" in logged
 
+
+
+def test_purity_shadow_logs_one_summary_per_discovery_at_info(tmp_path, monkeypatch, caplog):
+    # Per-phrase would-drops at INFO filled auto-reindex.log to 237 MB (2.38 M lines,
+    # 2026-07-06..2026-10-11): every reindex re-logged the same list. At INFO a discovery
+    # pass now says how many phrases shadow mode would drop, once; DEBUG still lists them.
+    monkeypatch.setattr(sd, "SKILL_TRIGGER_PURITY", "shadow")
+    personal = tmp_path / "personal"
+    make_skill(personal, "net", body=_PURITY_BODY)
+    make_skill(personal, "net2", body=_PURITY_BODY)
+    monkeypatch.setattr(sd, "SKILL_DIRS", [personal])
+    monkeypatch.setattr(sd, "PLUGIN_GLOB", str(tmp_path / "none" / "**" / "SKILL.md"))
+    import logging
+    with caplog.at_level(logging.INFO, logger="skill_search"):
+        sd.discover_skills()
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert not any("would-drop:" in m for m in msgs)
+    summary = [m for m in msgs if "trigger-purity" in m]
+    assert summary == ["trigger-purity shadow: 4 would-drop phrases across 2 skills"]
 
 def test_purity_active_drops_impure_keeps_pure(tmp_path, monkeypatch):
     monkeypatch.setattr(sd, "SKILL_TRIGGER_PURITY", "active")

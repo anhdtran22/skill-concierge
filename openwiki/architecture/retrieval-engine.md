@@ -139,7 +139,9 @@ phrases fill slots the median description left empty (descriptions used ~3 of 12
 step, or a doing-verb + pipeline/workflow/report/steps object) rather than a triggering
 **condition** — a process narration buries the real skill instead of matching user intent.
 Controlled by `SKILL_TRIGGER_PURITY` (default `shadow`): shadow only *logs* would-drops and keeps
-every phrase (index byte-identical); `active` actually drops them, but needs a **full** reindex —
+every phrase (index byte-identical). Each would-drop is a DEBUG line; a discovery pass logs one INFO
+count (`trigger-purity shadow: N would-drop phrases across M skills`), so set the `skill_search` logger
+to DEBUG to review the list; `active` actually drops them, but needs a **full** reindex —
 an incremental one would leave unchanged skills with their old unfiltered phrases, a mixed index;
 `off` skips the check. Ships shadow-only at v0.14.0 — inert until someone reviews the logged
 would-drops and flips it to `active`.

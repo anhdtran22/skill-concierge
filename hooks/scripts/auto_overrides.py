@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from selfheal import recent as _recent  # noqa: E402
+    from selfheal import recent as _recent, rotate_log  # noqa: E402
 except Exception:  # fail-silent: a hook must never break session start
     sys.exit(0)
 
@@ -59,6 +59,7 @@ def main() -> int:
         LOGDIR.mkdir(parents=True, exist_ok=True)
         # Stamp BEFORE spawning so a crash-looping applier can't re-spawn every session.
         STAMP.write_text(str(int(time.time())), encoding="utf-8")
+        rotate_log(LOGFILE)
         with open(LOGFILE, "a", encoding="utf-8") as logf:
             logf.write(f"\n=== auto-overrides {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
             logf.flush()

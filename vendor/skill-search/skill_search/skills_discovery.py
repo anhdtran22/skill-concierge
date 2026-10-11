@@ -445,6 +445,10 @@ _BODY_BULLET_RE = re.compile(r"^[ \t]*[-*•]\s+")
 # even "generate a report" as a use-case) stay. Precision is reviewed on the live
 # corpus before anyone flips this to `active` (see ADR-0023).
 SKILL_TRIGGER_PURITY = os.environ.get("SKILL_TRIGGER_PURITY", "shadow").lower()
+# Shadow would-drops per skill for the current discovery pass; discover_skills() logs one
+# INFO summary from it (each phrase is DEBUG: logging every phrase at INFO on every
+# reindex grew auto-reindex.log to 237 MB by 2026-10-11).
+_PURITY_WOULD_DROP: dict[str, int] = {}
 
 # Impure signal 1: a numbered step lead ("1. …", "2) …", "Step 3 …").
 _IMPURE_STEP_RE = re.compile(r"^\s*(?:\d+[.)]\s|step\s+\d+\b)", re.IGNORECASE)
@@ -498,7 +502,8 @@ def _extract_body_triggers(body: str, skill_name: str = "") -> list[str]:
             if SKILL_TRIGGER_PURITY != "off" and _is_impure_trigger(line):
                 if SKILL_TRIGGER_PURITY == "active":
                     continue
-                log.info("trigger-purity would-drop: (%r, %r)", skill_name, line)
+                log.debug("trigger-purity would-drop: (%r, %r)", skill_name, line)
+                _PURITY_WOULD_DROP[skill_name] = _PURITY_WOULD_DROP.get(skill_name, 0) + 1
             phrases.append(line)
     return phrases
 
@@ -1112,6 +1117,7 @@ def discover_skills() -> list[dict]:
     ~/.claude/skills pointing back into the catalog clone) is suppressed — the
     promoted personal copy is the invokable truth, the catalog twin is noise."""
     found: dict[str, dict] = {}
+    _PURITY_WOULD_DROP.clear()
     for p in discover_skill_paths():
         skill = parse_skill(p)
         if skill and skill["name"]:
@@ -1133,4 +1139,7 @@ def discover_skills() -> list[dict]:
         except OSError:
             pass
         found.setdefault(skill["name"], skill)       # installed name always wins
+    if _PURITY_WOULD_DROP:
+        log.info("trigger-purity shadow: %d would-drop phrases across %d skills",
+                 sum(_PURITY_WOULD_DROP.values()), len(_PURITY_WOULD_DROP))
     return list(found.values())

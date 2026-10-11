@@ -639,3 +639,12 @@ plugin-level customization layer and these engine patches.
   copies the plugin's own skills there and registers the folder in `opencode.json` `skills`, because
   `~/.config/opencode/skills` is often a symlink to `~/.claude/skills`. Covered by
   `tests/test_opencode_adapter.py`. Not upstream: re-apply on re-vendor.
+
+- **`skills_discovery.py` + `server.py` quieter reindex logs (2026-10-11):** a shadow-mode
+  trigger-purity would-drop is now logged per phrase at DEBUG, and `discover_skills()` logs one INFO
+  summary per pass (`trigger-purity shadow: N would-drop phrases across M skills`). The `--reindex` /
+  `--rebuild` CLI path sets the `httpx` logger to WARNING, so each store request no longer logs an INFO
+  line. Both had grown the background `auto-reindex.log` to 237 MB and `auto-flywheel.log` to 69 MB by
+  2026-10-11 (the hooks now also rotate those logs, `hooks/scripts/selfheal.py` `rotate_log`). Index
+  output is unchanged. Covered by `tests/test_discovery.py` (`test_purity_shadow_*`). Not upstream:
+  re-apply on re-vendor.

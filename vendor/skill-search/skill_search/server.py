@@ -1576,6 +1576,8 @@ def main() -> None:
     `--reindex` incremental (add --force for full rebuild); `--rebuild` full;
     `--health` diagnose (exits non-zero when degraded, for cron/CI)."""
     if "--reindex" in sys.argv or "--rebuild" in sys.argv:
+        # One INFO line per store request filled the background reindex logs; keep warnings.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
         force = "--rebuild" in sys.argv or "--force" in sys.argv
         print(json.dumps({**build_index(force=force), "collection": COLLECTION}))
     elif "--health" in sys.argv:

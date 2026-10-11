@@ -3,6 +3,23 @@
 All notable changes to **skill-concierge**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and evolving.
 
+## [0.66.4] - 2026-10-11
+
+### Fixed
+- **The background self-heal logs no longer grow without bound.** `auto_reindex`, `auto_flywheel` and
+  `auto_overrides` append each detached run's output to one log per hook, and nothing ever rotated them:
+  `auto-reindex.log` had reached 237 MB (2.38 M lines since 2026-07-06) and `auto-flywheel.log` 69 MB. Each hook
+  now rotates its log before appending (`hooks/scripts/selfheal.py` `rotate_log`): past 5 MB the file moves to
+  `.1`, keeping 3 older generations.
+- **A reindex now writes a few lines instead of thousands.** Most of that volume was the vendored engine logging
+  every shadow-mode trigger-purity would-drop at INFO on every reindex, plus one INFO line per store request from
+  `httpx`. Each would-drop is now a DEBUG line under one INFO count per discovery pass (`trigger-purity shadow: N
+  would-drop phrases across M skills`), and the reindex CLI keeps `httpx` at WARNING. Measured on this machine: one
+  reindex went from 756,490 bytes (9,318 lines) to 599 bytes (7 lines). The index itself is unchanged.
+- **The test suite no longer inherits the owner's smoke advisory list.** `tests/conftest.py` also clears
+  `SMOKE_ADVISORY`; a shell that had loaded `harness-env.sh` failed the two smoke tests that assert the strict
+  default.
+
 ## [0.66.3] - 2026-10-10
 
 ### Fixed

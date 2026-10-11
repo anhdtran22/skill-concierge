@@ -9,6 +9,28 @@ import time
 import urllib.request
 
 
+# A hook's background log is rotated past this size, keeping LOG_KEEP older generations
+# (auto-reindex.log had reached 237 MB unrotated by 2026-10-11).
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_KEEP = 3
+
+
+def rotate_log(path, max_bytes=LOG_MAX_BYTES, keep=LOG_KEEP):
+    """Move `path` to `path.1` (older generations shift up, the oldest past `keep` is
+    dropped) once it exceeds `max_bytes`. Call before opening the log for append. A child
+    still writing to the old file keeps its descriptor and finishes into `path.1`."""
+    try:
+        if path.stat().st_size <= max_bytes:
+            return
+    except FileNotFoundError:
+        return
+    for n in range(keep - 1, 0, -1):
+        older = path.with_name(f"{path.name}.{n}")
+        if older.exists():
+            os.replace(older, path.with_name(f"{path.name}.{n + 1}"))
+    os.replace(path, path.with_name(f"{path.name}.1"))
+
+
 def recent(path, within):
     try:
         return (time.time() - path.stat().st_mtime) < within
