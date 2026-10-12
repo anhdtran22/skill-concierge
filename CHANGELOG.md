@@ -3,6 +3,27 @@
 All notable changes to **skill-concierge**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and evolving.
 
+## [0.68.2] - 2026-10-12
+
+### Added
+- **`concierge-enhancer` 0.3.0: a band above the prompt with a manual trigger.** While the box holds a draft or a menu
+  shows, the band reads `concierge [ Rank now ]` with the menu under it. **Rank now** ranks the draft at once, no
+  pause: click it, focus the band (`ctrl+x tab`) and press `r`, or press `ctrl+x b` straight from the prompt (the
+  engine action `app:cycleDiffBase`; bind your own chord to it in `~/.claude/keybindings.json`). Keys `1`–`5` (with the
+  band focused) insert that skill's full name into the prompt at the cursor, spaced from the word before it.
+- **The band stacks.** It draws its own rows and keeps the drawing beneath them, and yields to a survey, so it shows
+  beside other mods' bands; prompt-enhancer 0.2.1 stacks the same way.
+- **New option `autoRank`** (default on): off, only **Rank now** ranks.
+
+### Changed
+- **Names fit the real terminal width.** The band lays the menu out on up to two rows; the status line's budget is the
+  terminal width (from the band's last drawing) minus its prefix, instead of a fixed 76 characters. A name loses its
+  middle only when it still does not fit.
+- **Spend cap:** at most two draft rankings per composed prompt (one automatic, the rest by **Rank now**), plus the
+  hook's ranking at Enter when the draft changed after the last one. Only sending resets the count.
+
+The enforcer and `offer_ticket.py` are unchanged, so the v0.68.0 ledger epoch continues.
+
 ## [0.68.1] - 2026-10-12
 
 ### Fixed

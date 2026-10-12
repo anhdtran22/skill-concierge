@@ -1,5 +1,6 @@
-// concierge-enhancer v0.2 domain types. The mod adds no noun to `$` and keeps no `$.state`:
-// it draws nothing (no ui.render hook), so it has no drawing state to subscribe to.
+// concierge-enhancer v0.3 domain types. The mod keeps two `$.state` values (PluginState below): the
+// band's view and the chord that presses "Rank now". The Speculator publishes the view; the
+// AbovePrompt hook in hooks/register.tsx only reads it and draws.
 
 // What concierge will offer for the current draft, as the speculative enforcer run decided it.
 // Parsed once, at the process boundary, from the enforcer's `skillConciergeSpeculation` object;
@@ -18,3 +19,32 @@ export type Preview =
 
 // The one-line status the mod pins under the prompt for a Preview; undefined clears it.
 export type StatusLine = string | undefined
+
+// The menu the band shows. `mark` is '▸' for the ranking of the draft in the box (digit keys are
+// bound only then: the box is not empty) and '✓' for the menu the model got after a send (the box is
+// empty, where a bare digit would be taken by a band button, so no digit is bound). `text` is the
+// menu of a lane that offers no skills ('no skill needed', 'consult').
+export type BandMenu =
+  | { readonly mark: '▸' | '✓'; readonly kind: 'skills'; readonly skills: readonly string[] }
+  | { readonly mark: '▸' | '✓'; readonly kind: 'text'; readonly text: string }
+
+// Everything the band draws, published by the Speculator and read by the AbovePrompt hook.
+export type BandView = {
+  // The box holds a draft (not empty, not a slash command).
+  readonly hasDraft: boolean
+  // A speculative run for the current draft is in flight.
+  readonly busy: boolean
+  readonly menu: BandMenu | null
+  // A short message for the person ("limit reached"); null: none.
+  readonly note: string | null
+}
+
+declare module 'claude-code' {
+  interface PluginState {
+    'concierge-enhancer': {
+      view: BandView
+      // The chord, as the person's keybindings.json has it, that presses "Rank now" from the prompt; null: none.
+      chord: string | null
+    }
+  }
+}

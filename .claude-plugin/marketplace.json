@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Skill-governance layer for Claude Code, Codex, Command Code, Oh My Pi, ZCode, and DeepSeek Harness — semantic retrieval + use-enforcement + invocation ledger.",
-    "version": "0.68.1"
+    "version": "0.68.2"
   },
   "plugins": [
     {
@@ -20,12 +20,12 @@
         "hooks",
         "telemetry"
       ],
-      "version": "0.68.1"
+      "version": "0.68.2"
     },
     {
       "name": "concierge-enhancer",
       "source": "./adapters/claude-code/mod",
-      "description": "Claude Code mod: ranks your draft while you pause and shows skill-concierge's menu in the status line before you send; the hook then serves that same ranking at Enter, without a second Jev wait. No band, no hotkey, no rewrite. Needs the skill-concierge plugin.",
+      "description": "Claude Code mod: ranks your draft when you pause or press Rank now, shows skill-concierge's menu in a band above the prompt and in the status line, inserts a skill's name into your prompt with one key, and the hook serves that same ranking at Enter without a second Jev wait. Never rewrites your prompt; stacks with other mods' bands. Needs the skill-concierge plugin.",
       "category": "developer-tools",
       "tags": [
         "skills",

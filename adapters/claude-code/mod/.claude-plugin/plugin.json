@@ -1,7 +1,7 @@
 {
   "name": "concierge-enhancer",
-  "version": "0.2.1",
-  "description": "Ranks your draft with skill-concierge while you type, so the skill menu the model reads is ready when you press Enter, and shows that menu on the line under the prompt. Draws nothing above the prompt, binds no key and never rewrites your prompt. Needs the skill-concierge plugin.",
+  "version": "0.3.0",
+  "description": "Ranks your draft with skill-concierge while you type, or when you press Rank now, and shows the menu in a band above the prompt and on the line under it. Insert keys put a listed skill's name into your prompt. Never rewrites your text on its own. Needs the skill-concierge plugin.",
   "author": {
     "name": "thinhkhuat"
   },
@@ -15,8 +15,14 @@
     "pauseSeconds": {
       "type": "number",
       "title": "Pause before ranking (seconds)",
-      "description": "How long a draft of four words or more must stay still before it is ranked. Default 2. Shorter shows the menu sooner but can rank a half-finished sentence; the mod ranks at most once per prompt, and concierge ranks again at Enter if the draft changed.",
+      "description": "How long a draft of four words or more must stay still before it is ranked automatically. Default 2. Shorter shows the menu sooner but can rank a half-finished sentence. Per prompt the mod ranks at most twice: once automatically and once more when you press Rank now; concierge ranks again at Enter if the draft changed after that.",
       "default": 2
+    },
+    "autoRank": {
+      "type": "boolean",
+      "title": "Rank automatically after the pause",
+      "description": "On: a settled draft is ranked by itself, and Rank now ranks at once. Off: nothing is ranked until you press Rank now (the band's button, or its chord from the prompt).",
+      "default": true
     },
     "intent": {
       "type": "boolean",
@@ -24,5 +30,6 @@
       "description": "Experimental, off by default: it did not beat ranking the plain draft in the owner's blind comparison. On: asks the session's small model (haiku) for one sentence naming the work in your draft, and ranks the draft plus that sentence. The sentence goes to the ranker only, never to the prompt box or the model. Off: the draft is ranked alone.",
       "default": false
     }
-  }
+  },
+  "types": "./types/index.d.ts"
 }

@@ -11,7 +11,8 @@ import {
   INTENT_MAX_CHARS,
   INTENT_RULES,
   INTENT_TIMEOUT_MS,
-  MAX_RUNS_PER_DRAFT,
+  MAX_AUTO_RUNS,
+  MAX_RUNS_PER_PROMPT,
   MIN_WORDS,
   RANK_TIMEOUT_MS,
   SETTLE_MS,
@@ -20,7 +21,12 @@ import {
   enabledPluginsOf,
   findOffer,
   installedEnforcers,
+  bandRows,
+  statusBudget,
+  menuFor,
   parseSpeculation,
+  rankChordFrom,
+  sentMenu,
   rankable,
   sentStatus,
   statusFor,
@@ -74,6 +80,13 @@ type Fake = {
   tailsAnswered: number
   // While set, the tail child waits for it.
   tailGate: Promise<void> | null
+  // What the band's insert keys wrote into the box ($.prompt.fill), and whether the box takes it.
+  fills: { text: string; mode: string | undefined }[]
+  fillRefused: boolean
+  // While set, the fill calls it (the test raises the box's autocomplete event) before it resolves, as an edit does.
+  fillEcho: (() => Promise<unknown>) | null
+  // The text of the person's keybindings.json; null: no such file.
+  keybindings: string | null
 }
 
 // Stands in for the prompt box, the session, the small model, the plugin registry, the enforcer
@@ -102,6 +115,10 @@ function engine(on: On) {
     tails: [],
     tailsAnswered: 0,
     tailGate: null,
+    fills: [],
+    fillRefused: false,
+    fillEcho: null,
+    keybindings: null,
   }
   on('prompt.read', () => ({ value: { text: fake.box, cursor: fake.box.length } }))
   on('session.id', () => ({ value: 'sess-42' }))
@@ -118,10 +135,22 @@ function engine(on: On) {
   })
   on('settings.read', (_$, e) => ({ value: fake.settings[e.source ?? 'user'] ?? {} }))
   on('env.get', (_$, e) => ({ value: fake.env[e.name] }))
+  // What the engine draws in the band beneath the plugins: its own tree (an `engine` node).
+  on('ui.render', () => ({ type: 'engine' as const, ref: 0 }))
+  // The cursor sits at the end of the box, as it does after typing; an insert lands there.
+  on('prompt.fill', async (_$, e) => {
+    fake.fills.push({ text: e.text, mode: e.mode })
+    if (fake.fillRefused) return { isFilled: false }
+    fake.box = e.mode === 'insert' || e.mode === 'append' ? fake.box + e.text : e.text
+    await fake.fillEcho?.()
+    return { isFilled: true }
+  })
   on('fs.read', (_$, e) =>
     e.path === `${HOME}/.claude/plugins/installed_plugins.json` && fake.registry
       ? { value: JSON.stringify(fake.registry) }
-      : { deny: 'ENOENT' },
+      : e.path === `${HOME}/.claude/keybindings.json` && fake.keybindings !== null
+        ? { value: fake.keybindings }
+        : { deny: 'ENOENT' },
   )
   on('fs.stat', (_$, e) =>
     fake.files.has(e.path)
@@ -427,7 +456,7 @@ test('The submitted prompt passes through untouched: same text, no added context
 test('Enter resets the per-prompt run count; at most one run per composed prompt', async ($, on) => {
   const { fake, clock } = engine(on)
   await start($)
-  expect(MAX_RUNS_PER_DRAFT).toBe(1)
+  expect(MAX_AUTO_RUNS).toBe(1)
   for (const tail of ['one', 'two', 'three', 'four']) {
     await type($, fake, `${DRAFT} ${tail}`)
     await clock.advance(SETTLE_MS)
@@ -649,15 +678,15 @@ test('One unchanged draft across several notification turns starts at most one r
     await $.turn.complete({ answer: 'noted', durationMs: 5, isAborted: false, turnId: `n${i}`, reason: 'answer' })
     await clock.advance(SETTLE_MS)
   }
-  expect(fake.spawned.length).toBe(MAX_RUNS_PER_DRAFT)
-  expect(MAX_RUNS_PER_DRAFT).toBe(1)
+  expect(fake.spawned.length).toBe(MAX_AUTO_RUNS)
+  expect(MAX_AUTO_RUNS).toBe(1)
   expect(fake.spawned.map(s => JSON.parse(s.input).speculate.n)).toEqual([1])
   // Sending ends the composed prompt: the next one gets its own run.
   await $.prompt.submit(composer(DRAFT))
   await type($, fake, `${DRAFT} next prompt`)
   await clock.advance(SETTLE_MS)
-  expect(fake.spawned.length).toBe(MAX_RUNS_PER_DRAFT + 1)
-  expect(JSON.parse(fake.spawned[MAX_RUNS_PER_DRAFT]?.input ?? '{}').speculate.n).toBe(1)
+  expect(fake.spawned.length).toBe(MAX_AUTO_RUNS + 1)
+  expect(JSON.parse(fake.spawned[MAX_AUTO_RUNS]?.input ?? '{}').speculate.n).toBe(1)
 })
 
 test('An emptied box does not buy more runs for the next draft either; only a send does', async ($, on) => {
@@ -670,7 +699,7 @@ test('An emptied box does not buy more runs for the next draft either; only a se
   await type($, fake, '')
   await type($, fake, `${DRAFT} four`)
   await clock.advance(SETTLE_MS)
-  expect(fake.spawned.length).toBe(MAX_RUNS_PER_DRAFT)
+  expect(fake.spawned.length).toBe(MAX_AUTO_RUNS)
 })
 
 // ── The mod follows the skill-concierge the session runs, and stops when it is disabled ───────────
@@ -925,4 +954,533 @@ test('pauseSeconds unset ranks after 2000 ms', async ($, on) => {
   expect(fake.spawned.length).toBe(0)
   await clock.advance(1)
   expect(fake.spawned.length).toBe(1)
+})
+
+// ── The band above the prompt ─────────────────────────────────────────────────────────────────────
+// Mounted through the kit as the engine draws AbovePrompt: every plugin's ui.render hook, then the
+// engine's own tree (an `engine` node) beneath them.
+
+type Band = Awaited<ReturnType<typeof mountBand>>
+const mountBand = ($: Engine, surface: 'terminal' | 'desktop' = 'terminal', props: RenderPropsOf['AbovePrompt'] = BAND) =>
+  $.ui.mount({ plugin: 'concierge-enhancer', surface, component: 'AbovePrompt', props })
+const keysOf = async (ui: Band) => (await ui.findAll({ type: 'Button' })).map(b => b.key)
+const isDrawn = async (ui: Band) => (await ui.find({ key: 'rank' })) !== undefined
+const hasEngine = async (ui: Band) => JSON.stringify(await ui.drawn()).includes('"type":"engine"')
+const D2 = `${DRAFT} too`
+const D3 = `${DRAFT} three`
+const spokenN = (fake: Fake) => fake.spawned.map(s => JSON.parse(s.input).speculate.n)
+
+test('The band is drawn while the box holds a draft or a menu shows, and passes the engine drawing otherwise', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  // Nothing in the box, no menu: the chain's next(e) comes back untouched.
+  expect(await ui.drawn()).toEqual({ type: 'engine', ref: 0 })
+  // A draft: the rank row.
+  await type($, fake, DRAFT)
+  expect(await keysOf(ui)).toEqual(['rank'])
+  // The ranked menu: one more row with an insert key per skill.
+  await clock.advance(SETTLE_MS)
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2', 'insert-3'])
+  expect(await hasEngine(ui)).toBe(true)
+  // Editing clears the menu; an emptied box takes the whole band away.
+  await type($, fake, `${DRAFT} x`)
+  expect(await keysOf(ui)).toEqual(['rank'])
+  await type($, fake, '')
+  expect(await ui.drawn()).toEqual({ type: 'engine', ref: 0 })
+  // A slash command is not a draft.
+  await type($, fake, '/help me with this please')
+  expect(await ui.drawn()).toEqual({ type: 'engine', ref: 0 })
+  await ui.unmount()
+})
+
+test('The band shows one rank row and at most one menu row, and respects maxRows', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  const rows = async (ui: Band) => {
+    const tree = (await ui.drawn()) as { children?: { type: string }[] }
+    return (tree.children ?? []).filter(c => c.type === 'Box').length
+  }
+  const full = await mountBand($)
+  expect(await rows(full)).toBe(2)
+  const one = await mountBand($, 'terminal', { ...BAND, maxRows: 1 })
+  expect(await keysOf(one)).toEqual(['rank'])
+  expect(await rows(one)).toBe(1)
+  const none = await mountBand($, 'terminal', { ...BAND, maxRows: 0 })
+  expect(await none.drawn()).toEqual({ type: 'engine', ref: 0 })
+  await full.unmount()
+  await one.unmount()
+  await none.unmount()
+})
+
+test('The rank button names the engine action, the r hotkey, and shows the chord on the terminal only', async ($, on) => {
+  const { fake } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mountBand($, surface)
+    const rank = await ui.find({ key: 'rank' })
+    expect(rank?.props.action).toBe('app:cycleDiffBase')
+    expect(rank?.props.hotkey).toBe('r')
+    expect(rank?.text).toBe('Rank now')
+    expect((await ui.find({ type: 'Text', text: /ctrl\+x b rank now/ })) !== undefined).toBe(surface === 'terminal')
+    await ui.unmount()
+  }
+})
+
+test('The hint shows the chord from the person\'s keybindings.json, and none when they unbound the built-in one', async ($, on) => {
+  const { fake } = engine(on)
+  fake.keybindings = JSON.stringify({ bindings: [{ context: 'Chat', bindings: { 'Cmd+Shift+R': 'app:cycleDiffBase' } }] })
+  await start($)
+  await type($, fake, DRAFT)
+  const ui = await mountBand($)
+  expect(await ui.find({ type: 'Text', text: /cmd\+shift\+r rank now/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('rankChordFrom: own chord first, built-in unless remapped, never throws', () => {
+  expect(rankChordFrom(null)).toBe('ctrl+x b')
+  expect(rankChordFrom('not json')).toBe('ctrl+x b')
+  expect(rankChordFrom('{"bindings":[{"context":"Chat","bindings":{"cmd+e":"abovePrompt:focus"}}]}')).toBe('ctrl+x b')
+  expect(rankChordFrom('{"bindings":[{"context":"Global","bindings":{"alt+r":"app:cycleDiffBase"}}]}')).toBe('alt+r')
+  expect(rankChordFrom('{"bindings":[{"context":"DiffPanel","bindings":{"ctrl+y":"app:cycleDiffBase"}}]}')).toBe('ctrl+y')
+  expect(rankChordFrom('{"bindings":[{"context":"DiffPanel","bindings":{"ctrl+x b":null}}]}')).toBe(null)
+  expect(rankChordFrom('{"bindings":[{"context":"DiffPanel","bindings":{"ctrl+x b":"app:cycleDiffBase"}}]}')).toBe('ctrl+x b')
+  expect(rankChordFrom('{"bindings":5}')).toBe('ctrl+x b')
+})
+
+test('Rank now ranks the current draft at once, no pause, and shows the menu on the band and the line', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  const ui = await mountBand($)
+  await ui.press({ key: 'rank' })
+  await clock.settle()
+  expect(fake.spawned.length).toBe(1)
+  expect(JSON.parse(fake.spawned[0]?.input ?? '{}')).toEqual({
+    prompt: DRAFT,
+    session_id: 'sess-42',
+    cwd: '/work/app',
+    speculate: { intent: '', n: 1 },
+  })
+  expect(fake.status.at(-1)).toBe(MENU_STATUS)
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2', 'insert-3'])
+  // The pause it replaced never fires a second run for the same draft.
+  await clock.advance(SETTLE_MS * 3)
+  expect(fake.spawned.length).toBe(1)
+  await ui.unmount()
+})
+
+test('Rank now shows a draft already ranked again and spends no run', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  const ui = await mountBand($)
+  await ui.press({ key: 'rank' })
+  await clock.settle()
+  expect(fake.spawned.length).toBe(1)
+  expect(await keysOf(ui)).toContain('insert-1')
+  await ui.unmount()
+})
+
+test('Rank now says why it ranked nothing: a short draft, a running turn', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, 'fix it')
+  await ui.press({ key: 'rank' })
+  await clock.settle()
+  expect(fake.spawned.length).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /Type a draft of 4 words or more/ })).toBeDefined()
+  await type($, fake, DRAFT)
+  expect(await ui.find({ type: 'Text', text: /Type a draft/ })).toBeUndefined()
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await ui.press({ key: 'rank' })
+  await clock.settle()
+  expect(fake.spawned.length).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /A turn is running/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('At most two runs per composed prompt, the automatic one at most one; only a send resets the count', async ($, on) => {
+  const { fake, clock } = engine(on)
+  expect(MAX_RUNS_PER_PROMPT).toBe(2)
+  expect(MAX_AUTO_RUNS).toBe(1)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)                 // automatic run: 1 of 2
+  await type($, fake, D2)
+  await ui.press({ key: 'rank' })                // manual run: 2 of 2
+  await clock.settle()
+  expect(spokenN(fake)).toEqual([1, 2])
+  await type($, fake, D3)
+  await ui.press({ key: 'rank' })                // past the cap: nothing is ranked, the band says so
+  await clock.settle()
+  expect(fake.spawned.length).toBe(2)
+  expect(await ui.find({ type: 'Text', text: /Ranking limit reached for this prompt \(2\)/ })).toBeDefined()
+  // Neither emptying the box, nor a /clear, nor a model turn buys another run.
+  await type($, fake, '')
+  await $.session.end({ reason: 'clear', sessionId: 'sess-42', resume: { id: 'sess-42' } })
+  await type($, fake, D3)
+  await clock.advance(SETTLE_MS)
+  await ui.press({ key: 'rank' })
+  await clock.settle()
+  expect(fake.spawned.length).toBe(2)
+  // A composer send does.
+  await $.prompt.submit(composer(D3))
+  await clock.settle()
+  await type($, fake, DRAFT)
+  await ui.press({ key: 'rank' })
+  await clock.settle()
+  expect(spokenN(fake)).toEqual([1, 2, 1])
+  await ui.unmount()
+})
+
+test('Pressing Rank now first leaves the automatic run the second slot, and no more than that', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await ui.press({ key: 'rank' })                // manual: 1 of 2
+  await clock.settle()
+  await type($, fake, D2)
+  await clock.advance(SETTLE_MS)                 // automatic: 2 of 2
+  expect(spokenN(fake)).toEqual([1, 2])
+  await type($, fake, D3)
+  await clock.advance(SETTLE_MS * 2)             // nothing left
+  expect(fake.spawned.length).toBe(2)
+  await ui.unmount()
+})
+
+test('With the autoRank option off a settled draft is not ranked; only Rank now ranks', { options: { autoRank: false } }, async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS * 3)
+  expect(fake.spawned.length).toBe(0)
+  expect(fake.status).toEqual([])
+  expect(await isDrawn(ui)).toBe(true)
+  await ui.press({ key: 'rank' })
+  await clock.settle()
+  expect(fake.spawned.length).toBe(1)
+  expect(fake.status.at(-1)).toBe(MENU_STATUS)
+  // A turn ending does not wake the automatic path either.
+  await type($, fake, D2)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.turn.complete({ answer: 'ok', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(SETTLE_MS * 3)
+  expect(fake.spawned.length).toBe(1)
+  await ui.unmount()
+})
+
+test('An insert key puts the skill\'s exact name into the box at the cursor, spaced from the word before it, and keeps the menu', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  const ui = await mountBand($)
+  await ui.press({ key: 'insert-2' })
+  await clock.settle()
+  expect(fake.fills).toEqual([{ text: ' frontend-design ', mode: 'insert' }])   // the draft ends in a word
+  expect(fake.box).toBe(`${DRAFT} frontend-design `)
+  // The menu is still there for the next skill, the line still describes it, and no new run starts.
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2', 'insert-3'])
+  expect(fake.status.at(-1)).toBe(MENU_STATUS)
+  await ui.press({ key: 'insert-1' })
+  await clock.settle()
+  expect(fake.fills.at(-1)).toEqual({ text: 'ui-styling ', mode: 'insert' })   // after a space: none added
+  await clock.advance(SETTLE_MS * 3)
+  expect(fake.spawned.length).toBe(1)
+  expect(await keysOf(ui)).toContain('insert-3')
+  // The engine echoing the fill as an edit changes nothing either.
+  await type($, fake, fake.box)
+  await clock.advance(SETTLE_MS * 3)
+  expect(fake.spawned.length).toBe(1)
+  expect(await keysOf(ui)).toContain('insert-3')
+  // Typing something else clears the menu as always.
+  await type($, fake, `${fake.box}and more`)
+  expect(await keysOf(ui)).toEqual(['rank'])
+  await ui.unmount()
+})
+
+test('An insert that raises the box\'s own edit event keeps the menu and starts no ranking', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  fake.fillEcho = () => type($, fake, fake.box)
+  await type($, fake, DRAFT)
+  const ui = await mountBand($)
+  await ui.press({ key: 'rank' })                // manual run first: the automatic one is still unspent
+  await clock.settle()
+  expect(fake.spawned.length).toBe(1)
+  await ui.press({ key: 'insert-3' })
+  await clock.settle()
+  expect(fake.box).toBe(`${DRAFT} ak-test `)
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2', 'insert-3'])
+  expect(fake.status.at(-1)).toBe(MENU_STATUS)
+  await clock.advance(SETTLE_MS * 3)
+  expect(fake.spawned.length).toBe(1)
+  expect(await keysOf(ui)).toContain('insert-1')
+  await ui.unmount()
+})
+
+test('An insert the box refuses says so on the band and changes nothing else', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  fake.fillRefused = true
+  const ui = await mountBand($)
+  await ui.press({ key: 'insert-1' })
+  await clock.settle()
+  expect(fake.box).toBe(DRAFT)
+  expect(await ui.find({ type: 'Text', text: /did not take the text/ })).toBeDefined()
+  expect(await keysOf(ui)).toContain('insert-1')
+  await ui.unmount()
+})
+
+test('Digit keys exist only over a draft: the menu after a send, shown over an empty box, binds none', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.ledger = [NEW_ROW].join('\n') + '\n'
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  // ▸ over a draft: the box is not empty, so a digit typed there is text; the keys 1..3 press when the band is focused.
+  const hotkeys = async () => (await ui.findAll({ type: 'Button' })).filter(b => (b.key ?? '').startsWith('insert-')).map(b => b.props.hotkey)
+  expect(await hotkeys()).toEqual(['1', '2', '3'])
+  // Send: the ✓ menu shows over an empty box, where a bare digit would be taken by a band button.
+  await $.prompt.submit(composer(DRAFT))
+  fake.box = ''
+  await clock.settle()
+  expect(fake.status.at(-1)).toBe(SENT_STATUS)
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2'])
+  expect(await hotkeys()).toEqual([undefined, undefined])
+  // The ✓ keys still insert, by pointer or focus.
+  await ui.press({ key: 'insert-1' })
+  await clock.settle()
+  expect(fake.fills.at(-1)).toEqual({ text: 'ui-styling ', mode: 'insert' })
+  await ui.unmount()
+})
+
+test('A digit typed at the start of the next prompt is the prompt\'s: the ✓ band goes with the first character', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.ledger = NEW_ROW + '\n'
+  await start($)
+  const ui = await mountBand($)
+  await $.prompt.submit(composer(DRAFT))
+  fake.box = ''
+  await clock.settle()
+  const digitKeys = async () => (await ui.findAll({ type: 'Button' })).filter(b => /^\d$/.test(String(b.props.hotkey ?? '')))
+  expect(await digitKeys()).toEqual([])
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2'])
+  await type($, fake, '1')
+  // The ✓ menu is gone with the first character; what is left is the rank row, which has no digit key.
+  expect(await keysOf(ui)).toEqual(['rank'])
+  expect(await digitKeys()).toEqual([])
+  await ui.unmount()
+})
+
+test('An empty ▸ menu or a lane with no skills draws text and no insert keys', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.stdout = JSON.stringify({ skillConciergeSpeculation: { v: 1, ticket: 'ranked', preview: { kind: 'no-skill' } } })
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  expect(await keysOf(ui)).toEqual(['rank'])
+  expect(await ui.find({ type: 'Text', text: /no skill needed/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('A survey holds the band: the mod yields, and the status line still shows the menu', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($, 'terminal', { ...BAND, hasSurvey: true })
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  expect(await ui.drawn()).toEqual({ type: 'engine', ref: 0 })
+  expect(fake.status.at(-1)).toBe(MENU_STATUS)
+  await ui.unmount()
+})
+
+test('The status line is the same with the band mounted or not', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  const without = [...fake.status]
+  const ui = await mountBand($)
+  await $.prompt.submit(composer(DRAFT))
+  expect(without).toEqual([MENU_STATUS])
+  expect(fake.status).toEqual([MENU_STATUS, undefined])
+  await ui.unmount()
+})
+
+// ── Composition with other plugins' bands ─────────────────────────────────────────────────────────
+// A plugin in the `prepend` tier is outside the mod (it calls the mod through next), one in `append`
+// is inside it (the mod calls it through next).
+
+const composingPeer = (tier: 'prepend' | 'append') => ({
+  name: 'peer-compose',
+  tier,
+  register(on: On) {
+    on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+      const below = await next(e)
+      const { Box, Button } = $.ui.resolve(e)
+      return (
+        <Box flexDirection="column">
+          <Button key="peer-row" label="Peer" hotkey="p" onPress={() => {}} />
+          {below}
+        </Box>
+      )
+    })
+  },
+})
+const stubbornPeer = (tier: 'prepend' | 'append') => ({ ...PEER, tier })
+
+test('Peer outside, composing: both rows and the engine drawing show', { plugins: [composingPeer('prepend')] }, async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  expect(await keysOf(ui)).toEqual(['peer-row', 'rank', 'insert-1', 'insert-2', 'insert-3'])
+  expect(await hasEngine(ui)).toBe(true)
+  // And with nothing in the box the mod passes the peer's drawing through untouched.
+  await type($, fake, '')
+  expect(await keysOf(ui)).toEqual(['peer-row'])
+  expect(await hasEngine(ui)).toBe(true)
+  await ui.unmount()
+})
+
+test('Peer inside, composing: both rows and the engine drawing show', { plugins: [composingPeer('append')] }, async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2', 'insert-3', 'peer-row'])
+  expect(await hasEngine(ui)).toBe(true)
+  await type($, fake, '')
+  expect(await keysOf(ui)).toEqual(['peer-row'])
+  await ui.unmount()
+})
+
+test('Peer inside that does not compose: the mod, outside it, still shows its rows above the peer\'s', { plugins: [stubbornPeer('append')] }, async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  expect(await keysOf(ui)).toEqual(['rank', 'insert-1', 'insert-2', 'insert-3', 'peer-enhance'])
+  await ui.unmount()
+})
+
+test('Peer outside that does not compose draws alone, and the status line carries the menu', { plugins: [stubbornPeer('prepend')] }, async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  expect(await keysOf(ui)).toEqual(['peer-enhance'])
+  expect(fake.status.at(-1)).toBe(MENU_STATUS)
+  await ui.unmount()
+})
+
+test('Both bands survive a survey: a composing peer outside and the mod inside yield to it', { plugins: [composingPeer('prepend')] }, async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  const ui = await mountBand($, 'terminal', { ...BAND, hasSurvey: true })
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  expect(await keysOf(ui)).toEqual(['peer-row'])
+  await ui.unmount()
+})
+
+// ── Fitting names to the band ─────────────────────────────────────────────────────────────────────
+
+const LONG = ['superpowers:systematic-debugging-and-root-cause-analysis', 'frontend-design', 'plugin-dev:agent-development-guide']
+
+const labelsOf = (r: ReturnType<typeof bandRows>) => r.rows.flat().map(slot => slot.label)
+
+test('bandRows keeps whole names where they fit, cuts the middle where they do not, and counts what it leaves out', () => {
+  expect(bandRows(['a-skill', 'b-skill'], 80, 3, 1)).toEqual({ rows: [[{ label: 'a-skill', index: 0 }, { label: 'b-skill', index: 1 }]], more: 0 })
+  expect(labelsOf(bandRows(LONG, Infinity, 3, 1))).toEqual(LONG)
+  const cut = bandRows(LONG, 50, 3, 1)
+  expect(cut.rows.length).toBe(1)
+  expect(labelsOf(cut).every(l => l.length <= 14)).toBe(true)
+  expect(labelsOf(cut)[0]?.startsWith('superp')).toBe(true)
+  expect(labelsOf(cut)[0]?.endsWith('lysis')).toBe(true)
+  const tiny = bandRows(LONG, 24, 3, 1)
+  expect(tiny.more).toBeGreaterThan(0)
+  expect(labelsOf(tiny).length + tiny.more).toBe(3)
+  // Never more than five insert keys.
+  expect(labelsOf(bandRows(['a', 'b', 'c', 'd', 'e', 'f', 'g'], 200, 3, 1))).toEqual(['a', 'b', 'c', 'd', 'e'])
+  expect(bandRows(['a', 'b', 'c', 'd', 'e', 'f', 'g'], 200, 3, 1).more).toBe(2)
+})
+
+test('A second row lets the five names of Thinh\'s live menu show whole on a 100-column band', () => {
+  const live = ['ccgui-plugin-creator', 'tui-fundamentals', 'superpowers-developing-for-claude-code:working-with-claude-code', 'pstack:principle-guard-the-context-window', 'ak-context-engineering']
+  const one = bandRows(live, 100, 3, 1)
+  expect(labelsOf(one).some(l => l.includes('…'))).toBe(true)   // one row: names are cut
+  const two = bandRows(live, 100, 3, 2)
+  expect(two.rows.length).toBe(2)
+  expect(two.more).toBe(0)
+  // The indices still point at the full names, in menu order.
+  expect(two.rows.flat().map(slot => slot.index)).toEqual([0, 1, 2, 3, 4])
+  expect(labelsOf(two).filter(l => l.includes('…')).length).toBeLessThan(labelsOf(one).filter(l => l.includes('…')).length)
+})
+
+test('The status line budget follows the terminal width and falls back to 76 before any drawing', () => {
+  expect(statusBudget(0)).toBe(76)
+  expect(statusBudget(200)).toBe(200 - 36)
+  expect(statusBudget(60)).toBe(40)   // never below 40
+  const names = ['ccgui-plugin-creator', 'tui-fundamentals', 'superpowers-developing-for-claude-code:working-with-claude-code', 'pstack:principle-guard-the-context-window', 'ak-context-engineering']
+  // 200 columns: only the one name too long for the shared cap loses its middle; the other four stay whole.
+  expect(statusFor({ kind: 'menu', skills: names, wholeShelf: true }, statusBudget(200))).toBe(
+    'concierge ▸ ccgui-plugin-creator · tui-fundamentals · superpowers-developing-for…e:working-with-claude-code · pstack:principle-guard-the-context-window · ak-context-engineering',
+  )
+  // The fixed 76 cuts every name, as Thinh saw.
+  expect(statusFor({ kind: 'menu', skills: names, wholeShelf: true })).toMatch(/^concierge ▸ ccgui-…eator · /)
+})
+
+test('On the terminal a long name is cut on the button and inserted whole; a desktop button shows it whole', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.stdout = JSON.stringify({
+    skillConciergeSpeculation: { v: 1, ticket: 'ranked', preview: { kind: 'menu', skills: LONG, whole_shelf: true } },
+  })
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(SETTLE_MS)
+  const narrow = await mountBand($, 'terminal', { ...BAND, bodyColumns: 50 })
+  expect((await narrow.find({ key: 'insert-1' }))?.text).toContain('…')
+  await narrow.press({ key: 'insert-1' })
+  await clock.settle()
+  expect(fake.fills.at(-1)).toEqual({ text: ` ${LONG[0]} `, mode: 'insert' })
+  const wide = await mountBand($, 'desktop')
+  expect((await wide.find({ key: 'insert-1' }))?.text).toBe(LONG[0])
+  await narrow.unmount()
+  await wide.unmount()
+})
+
+test('menuFor and sentMenu mirror statusFor and sentStatus: a menu exactly where a line shows', () => {
+  expect(menuFor({ kind: 'menu', skills: ['a', 'b'], wholeShelf: true })).toEqual({ mark: '▸', kind: 'skills', skills: ['a', 'b'] })
+  expect(menuFor({ kind: 'menu', skills: [], wholeShelf: true })).toBeNull()
+  expect(menuFor({ kind: 'no-skill' })).toEqual({ mark: '▸', kind: 'text', text: 'no skill needed' })
+  expect(menuFor({ kind: 'consult' })).toEqual({ mark: '▸', kind: 'text', text: 'consult' })
+  expect(menuFor({ kind: 'silent' })).toBeNull()
+  expect(sentMenu(null)).toBeNull()
+  expect(sentMenu({ band: 'offer', offered: [['ui-styling', 0.9], 'frontend-design'] })).toEqual({
+    mark: '✓',
+    kind: 'skills',
+    skills: ['ui-styling', 'frontend-design'],
+  })
+  expect(sentMenu({ band: 'jev_skip' })).toEqual({ mark: '✓', kind: 'text', text: 'no skill needed' })
+  expect(sentMenu({ band: 'consult_route' })).toEqual({ mark: '✓', kind: 'text', text: 'consult' })
+  expect(sentMenu({ band: 'fallback' })).toBeNull()
 })
