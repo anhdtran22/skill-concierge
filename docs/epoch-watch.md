@@ -13,6 +13,27 @@ say "insufficient data" when the window is too small. Never pool across epochs
 
 ---
 
+## v0.68.0 — the draft-time ticket (concierge-enhancer 0.2.0, `ENFORCER_TICKET`)
+
+**Epoch starts** at the 0.68.0 commit (take the exact time from `git log` on `hooks/scripts/enforcer.py` and `hooks/scripts/offer_ticket.py`). A turn can now carry a Jev verdict ranked while the person typed, so what the ledger measures changes in four ways.
+
+1. **Latency on a ticketed turn.** `jev.ms` on a served turn (`jev.src: "ticket"`) is the speculative run's routing time, not the wait after Enter. Every Jev latency figure must be split on `jev.src`.
+2. **Speculative runs write `{"ev": "speculate"}` rows**, never offer rows; `analyze.py` ignores them. They count the mod's Jev spend per sent prompt.
+3. **`via: "enhancer"` marks every turn where a ticket was found**, served or not. Split on `spec.st` before comparing it with live turns.
+4. **Three knobs change the served share with no code commit**: the mod's `intent` toggle (`spec.intent`, and `rq` on the row), its settle time, and `TICKET_TTL_S`, `TICKET_LIVE_RESERVE_S` or the fingerprints in `offer_ticket.py`. A change to any of them starts a new epoch.
+
+**Watch items.**
+
+| # | What | Trigger | Action |
+|---|------|---------|--------|
+| W49 | Distribution of `spec.st` on offer rows with `via: "enhancer"` (`ready`, `waited`, `stale`, `env`, `dead`, `late`, `unranked`) | `env` above a few percent once at least 30 ticketed turns are in the epoch (the mod's child env differs from the hook's); `stale` above ~30 % (a turn or a blocked skill lands between the draft and Enter); `late` or `dead` above ~10 % | `env`: diff the two environments (`fingerprint_env`); `stale`: read the ctx fingerprint inputs first, then the blocklist and catalogue re-check; `late`: the speculative run is slower than the wait it saves, check `jev.fell` |
+| W50 | `speculate` rows per sent prompt (`n` per `sid`) and their `ticket` outcome | the mean is above 3 (the per-prompt cap), or most runs end `unranked` | the mod's cap or kill logic is broken, or Jev runs end wide-only; killed runs write no row, so this undercounts spend |
+| W51 | `jev.src` split on Jev-routed offer rows: `ticket` against live, and `jev.ms` for each | the live `jev.ms` p50 drifts from the no-mod epoch (about 2.7 s), or `ticket` is a tiny share | the served share is the mod's whole payoff; if it is small, check W49 before judging the design |
+
+Trigger thresholds above are the doc author's proposals, not owner decisions; the live check was a handful of turns. Measurement notes: exclude subagent and self-session traffic as always; a session without the mod writes no `spec` or `via` and is the control.
+
+---
+
 ## v0.64.0 — staged Jev menu, Cline first-call chain, honest Cline offer row (ADR-0087)
 
 **Epoch starts** at the 0.64.0 commit (2026-10-08, Asia/Saigon); take the exact time from `git log` on `hooks/scripts/enforcer.py`. Two things change what the ledger measures.

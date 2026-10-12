@@ -1,6 +1,6 @@
 # skill-concierge
 
-[![version](https://img.shields.io/badge/version-0.67.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.68.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://docs.claude.com/en/docs/claude-code)
 [![built on](https://img.shields.io/badge/built%20on-skill--search-orange.svg)](https://github.com/sowhan/skill-search)
@@ -134,21 +134,17 @@ untouched; consult is the opt-in planning step. Since 0.43.0 the enforcer also R
 deliberation-shaped turns there ("which skills should I use for X") via a
 `CONSULT-ROUTE` mandate (ADR-0049 phase 2, `SKILL_CONSULT_ROUTE=0` to disable).
 
-### Enhance a prompt before you send it (Claude Code)
+### See the skill menu before you send (Claude Code)
 
-`concierge-enhancer` is an optional Claude Code mod in this repo ([`adapters/claude-code/mod/`](adapters/claude-code/mod/)). It adds a band above the prompt:
+`concierge-enhancer` is an optional Claude Code mod in this repo ([`adapters/claude-code/mod/`](adapters/claude-code/mod/)). It has no button, no hotkey and no band, and it never rewrites your prompt. When you stop typing for a second, it asks concierge to rank your draft, and the status line under the prompt shows the result:
 
 ```
-Concierge [ Enhance ]  ctrl+x tab · e enhance · esc back
-Skill preview: chisle · chisle:chisle · ak-devops · ak-backend-development · ak-databases
+concierge ▸ ui-styling · frontend-design · ak-test · writing-plans · ak-cook
 ```
 
-1. Type a rough draft.
-2. Focus the band (`ctrl+x tab`, or your own `abovePrompt:focus` chord) and press `e`.
-3. The draft is replaced by a sharper prompt, and the band previews the skills concierge ranks for it.
-4. Send it with Enter, as usual. Edit it first if you like.
+Press Enter as usual. When the ticket is ready, the model gets that same menu, ranked once. While you paused, the mod ran concierge's own `enforcer.py` on the draft, with your real session and transcript and Jev through jevd. That run left a ticket (`hooks/scripts/offer_ticket.py`). When the text you send is exactly that draft and the conversation has not moved on, the hook serves the ticket's Jev verdict instead of asking Jev again. When the ticket is ready at Enter, the usual Jev wait (about 2.7 s at the median) is already over. If you press Enter while the run is still ranking, the hook waits for it, but stops 3.5 s before its own Jev deadline and ranks live with the time left. The served rows are checked again at Enter: a skill you have blocklisted, kept off or lost from the catalogue since the draft settled is never served, and the hook ranks live instead. A ticket lives five minutes. The line says `(preview)` unless the ticket is ranked, because then the hook ranks the text itself and may build another menu. The mod makes at most three runs per composed prompt; sending the prompt (not a model turn starting or ending) begins a new count. It does nothing when skill-concierge is disabled in your settings at session start. Edit the draft and the line clears; send something else and the hook ranks it live, as before. Drafts under four words, slash commands and prompts from notifications are left alone. The ledger row of a served turn keeps the prompt as sent in `q` and adds `"via": "enhancer"`, a `spec` block (`st` is `ready`, `waited`, `stale`, `env`, `dead`, `late` or `unranked`) and `jev.src: "ticket"`.
 
-The rewrite names no skills and asks no questions back: it states the work, its domain and what done looks like, and keeps your own terms as you wrote them. Concierge ranks your raw draft plus a one-line intent from the rewrite, not the full rewrite, because a blind A/B on 20 real prompts found the full rewrite gives the worst menus ([report](plans/261012-0935-prompt-enhancer-ab/report.md)). When you send the rewrite unedited, the mod leaves a one-shot route hint, so the model's menu is ranked on the same text the band previewed; an edited prompt is ranked as sent. The preview is a preview: the ranking can differ from run to run. The ledger row keeps the prompt as sent in `q`, adds the route text as `rq` and marks `"via": "enhancer"`.
+The mod also has an `intent` option (off by default): a hidden one-line restatement of the draft, written by `haiku`, added to the text concierge ranks. It is off because two blind gates on 20 real prompts found no gain from it ([evidence](plans/261012-1206-concierge-enhancer-redesign/gate/)). Turn the hand-off off with `ENFORCER_TICKET=0`: the hook then ranks every turn live, while the mod keeps ranking drafts (and calling Jev) and marks every line `(preview)`. To stop that spend, turn off the mod's `enabled` option. The status line needs the terminal: the desktop app gets no preview.
 
 Install it at the prompt of a Claude Code terminal session; it needs the `skill-concierge` plugin installed:
 
@@ -156,7 +152,7 @@ Install it at the prompt of a Claude Code terminal session; it needs the `skill-
 /plugin install concierge-enhancer --marketplace thinhkhuat/skill-concierge
 ```
 
-Remove it with `/plugin uninstall concierge-enhancer`. Without the mod, no route hint is ever written and the enforcer behaves exactly as before.
+Remove it with `/plugin uninstall concierge-enhancer`. Without the mod, no ticket is ever written and the enforcer behaves exactly as before. It is built to run beside the standalone prompt-enhancer, by design: it shares no surface with it (that mod rewrites the box, and this one ranks whatever the box holds). The live side-by-side test is pending.
 
 ### MCP tools
 
@@ -417,7 +413,7 @@ gate in detail: [`enforcement-gate.md`](openwiki/architecture/enforcement-gate.m
 
 ## Status & roadmap
 
-Current release: `0.67.0` — **published**. Per-version history, including every release since
+Current release: `0.68.0` — **published**. Per-version history, including every release since
 `0.1.0`, lives in [`CHANGELOG.md`](CHANGELOG.md); the decisions behind them are in
 [`docs/adr/`](docs/adr/README.md). Per-epoch watch items (what to monitor after a release,
 triggers, env-first actions): [`docs/epoch-watch.md`](docs/epoch-watch.md) — the single canonical

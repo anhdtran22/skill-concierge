@@ -50,6 +50,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+_T_START = time.time()   # first thing after the imports, so a speculative run's `ms` counts the module-level work too
+
 # The one strict port grammar every port-deriving caller applies (vendor/skill-search/
 # skill_search/ports.py: owner, doctor, server.py, this hook, the bash launcher, setup.sh)
 # — ASCII digits only, 1-65535, deliberately narrower than a bare int() (which also accepts
@@ -72,6 +74,13 @@ except Exception:  # noqa: BLE001
     if __name__ == "__main__":
         sys.exit(0)  # a hook run stays silent on a broken install
     raise  # an importer (the findability sweep, skill_exclusions) handles the ImportError
+
+# The draft-time ticket channel (ENFORCER_TICKET). A copy without it simply never reads or writes a
+# ticket: every turn ranks live, as before.
+try:
+    import offer_ticket
+except Exception:  # noqa: BLE001
+    offer_ticket = None
 
 # ── endpoints ────────────────────────────────────────────────────────────────
 EMBED_HOST = os.environ.get("EMBED_SHIM_HOST", "127.0.0.1")
@@ -1229,38 +1238,15 @@ def _route_matches(sub: str, low: str) -> bool:
     return re.search(pat, low, re.ASCII) is not None
 
 
-ROUTE_HINTS = Path.home() / ".claude" / "skill-concierge" / "route-hints"
-ROUTE_HINT_TTL = 300    # seconds; the mod writes the hint inside the same submit, so this only guards clocks
+# ENFORCER_TICKET (default ON): the concierge-enhancer mod's draft-time ticket. A speculative run
+# (stdin `speculate`) ranks a settled draft before Enter and leaves a ticket (hooks/scripts/offer_ticket.py);
+# the hook for the same sent text serves that Jev verdict instead of asking Jev again. `=0`: speculative runs
+# write no ticket and the hook reads none, so every turn ranks live exactly as without the mod.
+TICKET = os.environ.get("ENFORCER_TICKET", "1") != "0"
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_VIA: dict = {}    # offer-row keys for a hinted run: via, q (the prompt as sent) and rq (the route text)
-
-
-def _route_hint(sid: str, prompt: str):
-    """The routing text the concierge-enhancer mod left for this exact prompt, or None.
-
-    The mod (adapters/claude-code/mod) writes `route-hints/<session_id>.json` as
-    `{"prompt", "route", "t"}` while the prompt is being submitted, before this hook runs.
-    One-shot: the file is removed whether or not it matches, so a hint never routes a later
-    prompt. Fail-silent: a missing, unreadable or mismatched hint means no hint."""
-    if not _SID_RE.match(sid or ""):
-        return None
-    path = ROUTE_HINTS / (sid + ".json")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError, RecursionError):
-        return None
-    try:
-        path.unlink()
-    except OSError:
-        pass
-    if not isinstance(data, dict):
-        return None
-    sent, route, t = data.get("prompt"), data.get("route"), data.get("t")
-    if (not isinstance(sent, str) or sent.strip() != prompt or not isinstance(route, str)
-            or not route.strip() or not isinstance(t, (int, float)) or not math.isfinite(t)
-            or abs(time.time() - t) > ROUTE_HINT_TTL):
-        return None
-    return route.strip()
+_VIA: dict = {}    # offer-row keys for a ticketed run: via, q (the prompt as sent), rq (the route text) and spec
+_SPECULATING = False    # set once in main() from stdin, never from the environment; one process = one turn
+_SPEC: dict = {}        # what a speculative run reached: sid, sent, n, intent, ticket, band, skills, whole_shelf
 
 
 def _route_hits(prompt: str, keepoff: frozenset = frozenset()) -> list:
@@ -1341,7 +1327,12 @@ def _append_offer(sid: str, band: str, offered: list, fallback, q: str, **kw) ->
     """Append the offer event built by `_offer_ev`. Fail-silent: telemetry must never surface.
     ENFORCER_LEDGER=0 writes no row. ENFORCER_LEDGER=defer writes none either: the row goes back
     to the caller in the hook output (`skillConciergeOffer`), because the Cline plugin (ADR-0086)
-    runs two passes per turn and only it knows which menu the model saw (ADR-0087)."""
+    runs two passes per turn and only it knows which menu the model saw (ADR-0087). A speculative run (the
+    concierge-enhancer mod's draft-time ranking) behaves as `defer` whatever the environment says and hands
+    nothing back: the turn's one offer row is the hook's. It only remembers the band, for its preview."""
+    if _SPECULATING:
+        _SPEC["band"] = band
+        return
     if os.environ.get("ENFORCER_LEDGER", "1") == "0":
         return
     try:
@@ -1370,7 +1361,7 @@ def _offer_ev(sid: str, band: str, offered: list, fallback, q: str, dropped=None
     ev = {"t": round(time.time(), 3), "sid": sid, "ev": "offer",
           "band": band, "offered": offered, "fallback": fallback, "q": q[:120],
           "harness": RUNNING_HARNESS}
-    ev.update(_VIA)    # a hinted run: "via": "enhancer", q as sent, rq the route text actually ranked
+    ev.update(_VIA)    # a ticketed run: "via": "enhancer", q as sent, rq the route text ranked, spec the ticket telemetry
     if dropped:
         ev["dropped"] = dropped
     if ext:
@@ -1407,7 +1398,7 @@ _DEFERRED: dict = {}
 
 def _inject(text: str) -> None:
     out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
-    if os.environ.get("ENFORCER_LEDGER") == "defer":
+    if _SPECULATING or os.environ.get("ENFORCER_LEDGER") == "defer":
         _DEFERRED.update(out)
         return
     sys.stdout.write(json.dumps(out))
@@ -2224,11 +2215,14 @@ def _jev_relay_timeout(e: urllib.error.HTTPError) -> bool:
     return err in ("TimeoutError", "timeout", "ReadTimeout")
 
 
-def _jev_route(prompt: str, transcript_path: str, sink: dict | None = None) -> dict:
+def _jev_route(prompt: str, transcript_path: str, sink: dict | None = None,
+               deadline: float | None = None) -> dict:
     """One ADR-0061 routing decision -> {"result": (verdict, rows, best_fit, pulled) | None, "event": {...}}.
     Result None = not eligible or failed: the embedding path decides. Runs in a worker thread, so
     it returns its telemetry instead of writing module state. ADR-0087: the event's `stage` says whether the
-    result is the full (reranked) menu or the wide pass's own menu, kept when no tier finished its rerank."""
+    result is the full (reranked) menu or the wide pass's own menu, kept when no tier finished its rerank.
+    `deadline` (absolute epoch seconds) defaults to the start plus JEV_BUDGET_S; a live route that follows a
+    ticket miss gets the hook's own deadline, so the Jev leg of a turn never outlasts today's budget."""
     if not (JEV_ROUTER and _is_english(prompt)):
         return {"result": None, "event": None}
     t0 = time.time()   # before the jevd ladder fetch, so the fetch spends this turn's budget
@@ -2238,7 +2232,7 @@ def _jev_route(prompt: str, transcript_path: str, sink: dict | None = None) -> d
                  or JEV_PIN_EP.get(JEV_TIER_PIN) == t["ep"]]
     if not any(_jev_key(t) for t in bench):
         return {"result": None, "event": None}
-    deadline = t0 + JEV_BUDGET_S
+    deadline = t0 + JEV_BUDGET_S if deadline is None else deadline
     src = {"bench": "jevd" if bench[0]["ep"] == "jevd" else "env"}
     fell, err = [], "NoTier"
     try:
@@ -2348,39 +2342,147 @@ def _jev_err(name: str, t0: float) -> dict:
     return {"err": name, "ms": int((time.time() - t0) * 1000), "leg": "router"}
 
 
-def _jev_start(prompt: str, transcript_path: str):
-    """Run `_jev_route` in a daemon thread so it overlaps the embed and Qdrant legs."""
+# A hook that waits on a still-ranking ticket stops this long before its Jev deadline, so the live route that
+# follows it keeps enough time for a tier call (TypeSafe 1.5 s, Command Code 5.5 s; ADR-0079).
+TICKET_LIVE_RESERVE_S = 3.5
+
+def _ticket_verdict_allowed(result) -> bool:
+    """A served ticket verdict was ranked before Enter, so it must still pass today's live filters. False when
+    any served row (main rows and pull-ins) is blocklisted, kept off, or missing from the current Jev catalogue
+    (which carries the not-invocable-here and plugin-gate tests); False too when that catalogue cannot be read,
+    because an unverifiable verdict is not served. A skip verdict serves no row and always passes."""
+    try:
+        names = [r[0] for r in list(result[1] or []) + list(result[3] or [])]
+        if not names:
+            return True
+        if any(_blocked(n) or n in KEEPOFF for n in names):
+            return False
+        live = {n for (n, _d) in _jev_catalog()}
+        return all(n in live for n in names)
+    except Exception:  # noqa: BLE001 — cannot verify means rank live
+        return False
+
+def _jev_start(prompt: str, transcript_path: str, ticket=None):
+    """Run `_jev_route` in a daemon thread so it overlaps the embed and Qdrant legs.
+
+    With a ticket (ENFORCER_TICKET), the worker first redeems it: when the ticket holds a Jev verdict for this
+    sent text under this turn's context and settings, that verdict stands in for the Jev call (event marked
+    `src: "ticket"`, `age_ms`); a run still ranking is waited for, never past the deadline minus
+    TICKET_LIVE_RESERVE_S. A served verdict whose rows are no longer allowed now (blocklist, keep-off, catalogue) is dropped as `stale`. Any miss ranks live
+    with the time that is left. `spec` in the box carries the redemption telemetry for the ledger row."""
     box = {}
     t0 = time.time()
+    deadline = time.time() + JEV_BUDGET_S
 
     def work():
         try:
-            box.update(_jev_route(prompt, transcript_path, box))
+            if ticket is not None:
+                box["spec"] = {"st": "late", "age_ms": max(0, int((time.time() - ticket.made) * 1000)),
+                               "wait_ms": 0, "n": ticket.n, "intent": bool(ticket.intent)}
+                try:
+                    prev, skills = _jev_context(transcript_path)
+                    red = offer_ticket.redeem(
+                        ticket, ctx=offer_ticket.fingerprint_ctx(prev, skills),
+                        env=offer_ticket.fingerprint_env(RUNNING_HARNESS, os.environ),
+                        until=deadline - TICKET_LIVE_RESERVE_S)
+                except Exception:  # noqa: BLE001 — a ticket problem is a miss, never a lost turn
+                    red = None
+                if red is not None:
+                    box["spec"] = red.spec
+                    if red.verdict is not None and not _ticket_verdict_allowed(red.verdict.result):
+                        box["spec"] = {**red.spec, "st": "stale"}   # a row is no longer allowed: rank live
+                    elif red.verdict is not None:
+                        box.update({"result": red.verdict.result,
+                                    "event": {**red.verdict.event, "src": "ticket",
+                                              "age_ms": red.spec["age_ms"]}})
+                        return
+                box.update(_jev_route(prompt, transcript_path, box, deadline=deadline))
+            else:
+                box.update(_jev_route(prompt, transcript_path, box))
         except Exception as e:  # noqa: BLE001 — the thread boundary: a hook never lets an error escape
             box.update({"result": None, "event": _jev_err(type(e).__name__, t0)})
     t = threading.Thread(target=work, daemon=True)
     t.start()
-    return t, box, time.time() + JEV_BUDGET_S
+    return t, box, deadline
 
 
 def _jev_join(job):
     """-> (verdict, rows, best_fit, pulled) or None (the embedding path decides); `pulled` (ADR-0083)
     is a list of owner-badged rows to show under `rows`, empty when none. Records this turn's Jev
-    telemetry for the ledger row; a route still running at the deadline is abandoned."""
+    telemetry for the ledger row; a route still running at the deadline is abandoned. A ticketed job
+    also records its redemption telemetry (`spec`), and a speculative run settles its ticket here, once the
+    job joined or was abandoned, whatever path main() takes next."""
     global _JEV_EVENT
     if job is None:
         return None
     t, box, deadline = job
     t.join(max(0.0, deadline - time.time()))
+    if box.get("spec"):
+        _VIA["spec"] = dict(box["spec"])
     if t.is_alive():
         wide = box.get("wide")   # ADR-0087: the wide menu the route already had still stands
         _JEV_EVENT = {"err": "BudgetExceeded", "ms": int(JEV_BUDGET_S * 1000), "leg": "router"}
         if wide is not None:
             _JEV_EVENT = {**wide["event"], **_JEV_EVENT}
+            _settle_speculation(wide["result"], wide["event"])
             return wide["result"]
+        _settle_speculation(None, None)
         return None
     _JEV_EVENT = box.get("event")
+    _settle_speculation(box.get("result"), _JEV_EVENT)
     return box.get("result")
+
+
+def _settle_speculation(result, event) -> None:
+    """A speculative run's ticket becomes final once its Jev job joined. Only a full-stage result (the reranked
+    menu, or the full route's skip) is stored: a wide-only or failed route settles `unranked`, so the hook gets
+    its own full-budget chance and keeps the wide safety net (ADR-0087)."""
+    if not _SPECULATING or _SPEC.get("ticket") != "ranking":
+        return
+    full = result is not None and isinstance(event, dict) and event.get("stage") == "full"
+    offer_ticket.settle(_SPEC["sid"], _SPEC["sent"], offer_ticket.Verdict(result, event) if full else None)
+    _SPEC["ticket"] = "ranked" if full else "unranked"
+
+
+_NO_SKILL_BANDS = ("jev_skip", "getaway", "intent_skip", "selfref_skip", "harness_skip")
+
+
+def _speculation_report() -> dict:
+    """The last stdout line of a speculative run, `skillConciergeSpeculation`: the ticket state and a preview of
+    what the hook would offer for this draft. `kind` follows the band the run reached: a menu (an offer, or the
+    named-skill fallback menu), `no-skill` (a SKILL-CHECK skip), `consult`, or `silent` (every lane exit). Also
+    appends the run's one `speculate` ledger row, so wasted runs are countable (analyze.py ignores unknown `ev`).
+    Never raises: the caller reads this line to learn the enforcer is compatible."""
+    report = {"v": 1, "ticket": "none",
+              "preview": {"kind": "silent", "skills": [], "whole_shelf": False}}
+    try:
+        _settle_speculation(None, None)   # a job that never joined (an early exit) leaves no half-open ticket
+        band, skills = _SPEC.get("band"), _SPEC.get("skills") if _SPEC.get("band") in ("offer", "fallback") else None
+        if band == "consult_route":
+            kind = "consult"
+        elif skills:
+            kind = "menu"
+        elif band in _NO_SKILL_BANDS and AUTHORIZED_SKIP:
+            kind = "no-skill"
+        else:
+            kind = "silent"
+        report["ticket"] = _SPEC.get("ticket") or "none"
+        report["preview"] = {"kind": kind, "skills": list(skills) if kind == "menu" else [],
+                             "whole_shelf": (bool(_SPEC.get("whole_shelf")) and report["ticket"] == "ranked")
+                             if kind == "menu" else False}   # only a ranked ticket makes the hook's menu this one
+        if os.environ.get("ENFORCER_LEDGER", "1") != "0":
+            ev = _JEV_EVENT if isinstance(_JEV_EVENT, dict) else {}
+            sid = _SPEC.get("sid")
+            row = {"t": round(time.time(), 3), "sid": sid if isinstance(sid, str) else "", "ev": "speculate",
+                   "n": _SPEC.get("n", 0), "intent": bool(_SPEC.get("intent")), "ticket": report["ticket"],
+                   "jev_stage": ev.get("stage") or ("err" if ev.get("err") else None),
+                   "ms": int((time.time() - _T_START) * 1000), "band": band, "harness": RUNNING_HARNESS}
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with LEDGER.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError, KeyError, OverflowError):
+        pass
+    return report
 
 
 def _jev_serve(sid: str, prompt: str, jev, offered: list, outage: str, **ledger) -> bool:
@@ -2881,6 +2983,9 @@ def _ranked_mandate(cands: list, annex: list | None = None, foreign: list | None
     total = sum(s for (_n, _d, s) in cands) or 1.0
     multi = len(cands) > 1
     ordered, n_intents = _intent_plan(cands)
+    if _SPECULATING:   # the preview is this very list, so it can never disagree with the menu the model reads
+        _SPEC["skills"] = [n for (n, _d, _s) in ordered][:JEV_OFFER_ROWS]
+        _SPEC["whole_shelf"] = bool(whole_shelf)
     lines = [f"  • {name}{_badge(name)}{(f' ({round(score / total * 100)}%)' if multi else '')} — {_blurb(desc)}"
              for name, desc, score in ordered]
     if multi and n_intents > 1:
@@ -3050,6 +3155,7 @@ CONSULT_MANDATE = (
 
 
 def main() -> int:
+    global _SPECULATING
     try:
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
@@ -3057,8 +3163,30 @@ def main() -> int:
             return 0
         prompt = (data.get("prompt") or "").strip()
         sid = data.get("session_id", "")
-        # Consumed first, so a hint never outlives the prompt it was left for, even one an early lane ends.
-        _hinted = _route_hint(sid, prompt)
+        transcript = data.get("transcript_path") or ""
+        # The concierge-enhancer mod's speculative run: this same pipeline, run on a settled draft while
+        # the user types. It writes no offer row, reads no ticket, and leaves one (offer_ticket).
+        spec_req = data.get("speculate")
+        _SPECULATING = isinstance(spec_req, dict)
+        _sid_ok = isinstance(sid, str) and _SID_RE.match(sid) is not None
+        _ticketing = TICKET and offer_ticket is not None and _sid_ok
+        ticket = None
+        intent = ""
+        if _SPECULATING:
+            _SPEC.update(sid=sid, sent=prompt, ticket="none")
+            try:
+                _SPEC["n"] = int(spec_req.get("n") or 0)
+            except (TypeError, ValueError, OverflowError):
+                _SPEC["n"] = 0
+            if isinstance(spec_req.get("intent"), str) and offer_ticket is not None:
+                intent = spec_req["intent"].strip()[:offer_ticket.MAX_INTENT_CHARS]
+            _SPEC["intent"] = bool(intent)
+            if _ticketing and not transcript:
+                transcript = offer_ticket.find_transcript(sid)
+        elif _ticketing and prompt:
+            # Read-only, before the lanes, so the lanes below still judge the prompt as sent.
+            ticket = offer_ticket.find(sid, prompt)
+            intent = ticket.intent if ticket is not None else ""
 
         # Cheap pre-gate (no I/O): empty, explicit slash-command (user already
         # chose a route), or an ultra-short acknowledgement. These never embed.
@@ -3103,24 +3231,37 @@ def main() -> int:
             _authorized_skip_inject("selfref", sid)
             return 0
 
-        # The concierge-enhancer mod's route hint (read at the top of main): rank the user's raw
-        # draft plus the rewrite's intent line, which beat the full rewrite in a blind A/B
-        # (plans/261012-0935-prompt-enhancer-ab/report.md). Applied after the no-I/O lanes, so those
-        # still judge the prompt as sent. The row keeps `q` as sent, so offers still pair with turns.
-        if _hinted:
-            _VIA.update(via="enhancer", q=prompt[:120], rq=_hinted[:120])
-            prompt = _hinted
+        # The ranked text is the author's own words plus the intent line the mod wrote for them, which
+        # beat the full rewrite in a blind A/B (plans/261012-0935-prompt-enhancer-ab/report.md). Applied
+        # after the no-I/O lanes, so those judge the prompt as sent. The offer row keeps `q` as sent, so
+        # offers still pair with turns.
+        sent = prompt
+        prompt = offer_ticket.route_text(sent, intent) if offer_ticket is not None else sent
+        if ticket is not None:
+            _VIA.update(via="enhancer", q=sent[:120], **({"rq": prompt[:120]} if intent else {}))
 
         # ADR-0054: deterministic routes run BEFORE the embed step (pure, no I/O) so a skill
         # the user NAMED still leads the menu when the shim or Qdrant times out — 4 of the 11
-        # named-and-missed prompts in the v0.46.0 epoch were lost on exactly that path.
-        _hits = _route_hits(prompt, KEEPOFF)
+        # named-and-missed prompts in the v0.46.0 epoch were lost on exactly that path. They match
+        # the text as sent: a name the intent writer produced is not the author's explicit intent.
+        _hits = _route_hits(sent, KEEPOFF)
         _hits_offered = [[n, 1.0] for (n, _d, _s) in _hits]
+
+        # A draft that carries a secret shape never reaches Jev from a speculative run (it may never be sent).
+        _secret = _SPECULATING and any(rx.search(prompt) for rx in _JEV_SECRET_RES)
+        if _SPECULATING and _ticketing and not _secret:
+            _will_route = bool(not _hits and JEV_ROUTER and _is_english(prompt))
+            offer_ticket.open_ticket(
+                sid, sent, intent, ranking=_will_route,
+                ctx=offer_ticket.fingerprint_ctx(*_jev_context(transcript)),
+                env=offer_ticket.fingerprint_env(RUNNING_HARNESS, os.environ),
+                deadline=time.time() + JEV_BUDGET_S, n=_SPEC.get("n", 0))
+            _SPEC["ticket"] = "ranking" if _will_route else "unranked"
 
         # ADR-0061 Jev skill router: after every no-I/O lane; started NOW in a worker thread so
         # it overlaps the embed and Qdrant legs, joined once retrieval is done. A NAMED skill
         # (deterministic hit) is explicit intent and never asks Jev.
-        _jev_job = _jev_start(prompt, data.get("transcript_path") or "") if not _hits else None
+        _jev_job = _jev_start(prompt, transcript, ticket) if not (_hits or _secret) else None
 
         def _fallback(reason: str, **ms) -> int:
             """Outage leg: the Jev verdict if one arrived, else the named hits or MANDATE-ONLY."""
@@ -3249,6 +3390,28 @@ def main() -> int:
     return 0
 
 
+def _run() -> int:
+    """The hook process: main(), then the one JSON object a deferred run hands back. A speculative run (stdin
+    `speculate`) always answers, on every exit path, with `skillConciergeSpeculation` as the last stdout line."""
+    try:
+        rc = main()
+    except Exception:  # noqa: BLE001 — a speculative run must still answer its caller; the hook keeps its behaviour
+        if not _SPECULATING:
+            raise
+        rc = 0
+    if _SPECULATING:
+        _DEFERRED["skillConciergeSpeculation"] = _speculation_report()
+    if _DEFERRED:
+        end = "\n" if _SPECULATING else ""
+        try:
+            sys.stdout.write(json.dumps(_DEFERRED, allow_nan=False) + end)
+        except (ValueError, TypeError, OSError):   # an unwritable value must never cost the turn its menu
+            fallback = {k: _DEFERRED[k] for k in ("hookSpecificOutput", "skillConciergeSpeculation") if k in _DEFERRED}
+            if fallback:
+                sys.stdout.write(json.dumps(fallback) + end)
+    return rc
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         # chisle: the --selftest CLI is cited by immutable ADRs; its body lives in tests/ so the
@@ -3261,11 +3424,4 @@ if __name__ == "__main__":
             sys.exit(2)
         exec(compile(_src, str(_st), "exec"), globals())
         sys.exit(globals()["_selftest"]())  # defined by the exec above
-    _rc = main()
-    if _DEFERRED:
-        try:
-            sys.stdout.write(json.dumps(_DEFERRED, allow_nan=False))
-        except (ValueError, TypeError, OSError):   # an unwritable value must never cost the turn its menu
-            if "hookSpecificOutput" in _DEFERRED:
-                sys.stdout.write(json.dumps({"hookSpecificOutput": _DEFERRED["hookSpecificOutput"]}))
-    sys.exit(_rc)
+    sys.exit(_run())

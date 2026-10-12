@@ -3,6 +3,48 @@
 All notable changes to **skill-concierge**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and evolving.
 
+## [0.68.0] - 2026-10-12
+
+### Changed
+- **`concierge-enhancer` 0.2.0 ranks your draft before you send it, and the hook reuses that ranking at Enter.**
+  The mod no longer has a band, a button, a hotkey or a prompt rewrite. When a draft of four or more words has been
+  still for one second, it runs concierge's own `enforcer.py` on it in speculate mode, under the real session id and
+  transcript, with Jev through jevd, and shows the result in the status line under the prompt
+  (`concierge ▸ ui-styling · frontend-design · …`). That run leaves a ticket
+  (`hooks/scripts/offer_ticket.py`, `~/.claude/skill-concierge/route-hints/<session_id>.ticket.json`). When the text
+  you send is exactly that draft and the conversation context and ranking settings are unchanged, the hook serves the
+  ticket's Jev verdict instead of calling Jev again, or waits for a run still in flight, never past 3.5 s before today's
+  Jev deadline (the live route keeps that reserve). A ticket lives five minutes. Before a verdict is served, its rows are
+  checked against today's blocklist, keep-off list and Jev catalogue; if any served row (main rows and pull-ins) is no
+  longer allowed, the hook ranks live and the offer row says `spec.st: "stale"`. Everything after the Jev step
+  (retrieval, gates, annexes, the menu text, the ledger row) runs as before.
+  Measured live: the offer row landed 0.3 s after Enter on a ticketed turn, where a live Jev ranking takes about
+  2.7 s at the median; the menu the model got equalled the status-line preview. One ranking per turn, so the preview
+  is the menu when the ticket is ready at Enter; the status line says `(preview)` whenever the run's ticket is not
+  `ranked`. By design it shares no surface with the standalone prompt-enhancer, so the two should run side by side;
+  the live side-by-side test is pending. The mod does nothing when skill-concierge is disabled in the settings at session start, and
+  it follows the install the session runs (a project-scope copy applies only inside its own project).
+- **The route hint is gone.** `_route_hint` and the `route-hints/<session_id>.json` file of 0.67.0 are replaced by the
+  ticket. A 0.67.0 mod still installed keeps its band, but the enforcer ignores its hint: update the mod.
+- **Deterministic routes match the prompt as sent only**, never added ranking text.
+- New flag `ENFORCER_TICKET` (default on; `=0` restores live ranking on every turn).
+
+### Notes
+- Unsent drafts that settle now reach Jev through jevd (the owner's Command Code and TypeSafe channels), as sent
+  prompts already do. Drafts matching the enforcer's secret patterns are skipped by the enforcer; at most three runs per
+  composed prompt, counted until you send it (a model turn starting or ending does not reset the count).
+- The mod's `intent` option (a hidden one-line restatement written by `haiku`) ships off: two blind gates on 20 real
+  prompts found no gain (haiku 5 wins vs 9 for the plain draft; sonnet 7 vs 7). Evidence:
+  `plans/261012-1206-concierge-enhancer-redesign/gate/README.md`. Design: `plans/261012-1206-concierge-enhancer-redesign/design.md`.
+- `hooks/hooks.json` is unchanged, so Codex users do not need to trust the hooks again.
+
+### Epoch
+- This release changes `hooks/scripts/enforcer.py`, so it starts a new retrieval epoch. On a ticketed turn
+  (`"via": "enhancer"`, `jev.src: "ticket"`) `jev.ms` is the speculative run's ranking time, not the wait after
+  Enter: split latency analyses on `jev.src`. Speculative runs write `{"ev": "speculate"}` rows, never offer rows. A change to `hooks/scripts/offer_ticket.py`
+  (TTL, fingerprints, wait rule) also starts a new epoch; so do the mod's `intent` toggle and settle time, which show
+  in `spec.intent` and `rq`.
+
 ## [0.67.0] - 2026-10-12
 
 ### Added

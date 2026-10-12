@@ -1,0 +1,10 @@
+# Arena rubric (picker and cross-judge only; candidates never see it)
+
+Score each criterion 0-3 (0 fails, 1 weak, 2 sound, 3 strong), with one sentence of evidence citing the candidate's own text.
+
+1. **One menu, one ranking.** The model reads exactly one menu per turn, from one ranking, and any preview the user sees is that same menu by construction, not a second run. Doctrine header semantics (whole-shelf vs preview) stay truthful. Offer and turn rows keep pairing on `(sid, q)`, and the new path is visible in the ledger.
+2. **Concierge-native, jevd leverage.** The design reuses the enforcer's real path and structured output (`defer` / `skillConciergeOffer`) with the real session context (transcript, session id), instead of scraping text or re-implementing ranking in TypeScript. It exploits jevd (warm, loopback, keyless) to move Jev latency off the turn's critical path or otherwise make the offer better, and it uses only facts the grounding proved (no dependence on `classic.UserPromptSubmit`).
+3. **Coexistence.** It composes on every shared surface (`next(e)` inside its trees, appends to `tail`/`context`/`decorations`), claims no contested hotkey, does not need to win the chain order, and degrades cleanly when another mod above it does not compose.
+4. **Seamless and fail-open.** It improves the initial menu without requiring a click; optional explicit actions stay optional. It costs nothing on harness text, slash commands and ≤3-word drafts, never blocks or delays a prompt past today's behavior, and concierge works unchanged with the mod absent and on every other harness.
+5. **Interface depth and simplicity.** Small public surface, few files, short call chains, one owner per piece of state, no hand-synced lists, passes the red-flags screen honestly, testable with the `claude-code/testing` kit plus Python tests.
+6. **Honest to evidence.** Claims only what is measured (the A/B's modest raw+intent effect; latency figures); names what is unverified and how it will be measured (epoch, `via`, stage).

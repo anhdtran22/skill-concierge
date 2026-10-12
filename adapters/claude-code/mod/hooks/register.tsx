@@ -1,229 +1,109 @@
-import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+// concierge-enhancer v0.2: the wiring. A thin shell; every decision lives in ./speculator.ts.
+//
+// The mod draws nothing and binds no key. It observes the draft, has skill-concierge rank it
+// while the person types (the enforcer's own path, Jev through jevd included), shows the result
+// on this plugin's own status line, and keeps the matching run alive across Enter so the
+// UserPromptSubmit hook can serve that same ranking. Every hook passes its event on unchanged.
+import type { Register } from 'claude-code'
 
-import type { Menu, Pending } from '../types'
+import { Speculator, enabledPluginsOf, locateEnforcer } from './speculator'
 
-const isBusy = atom({ plugin: 'concierge-enhancer', key: 'isBusy' } as const, false)
-const note = atom({ plugin: 'concierge-enhancer', key: 'note' } as const, null)
-const menu = atom({ plugin: 'concierge-enhancer', key: 'menu' } as const, null)
-const pending = atom({ plugin: 'concierge-enhancer', key: 'pending' } as const, null)
-const focusKey = atom({ plugin: 'concierge-enhancer', key: 'focusKey' } as const, 'ctrl+x tab')
+// Runtime handles (a child process, a timer, an AbortController) cannot live in `$.state`, which
+// holds plain data. A hot reload drops this value together with the timers it armed, which is the
+// right end for both: the next session.start (or reload) builds a fresh one.
+let speculator: Speculator | null = null
 
-const FALLBACK_MODEL = 'sonnet'
-const PREVIEW_SESSION = 'concierge-enhancer-preview'
+export const register: Register = (on, options) => {
+  // The `enabled` option off: no hook is registered, so the mod does nothing and concierge ranks
+  // each prompt at send time as it does without this mod. A change in the config menu reloads this.
+  if (options.enabled === false) return
+  // Off unless set: the intent gate did not beat the plain draft (see the `intent` option in plugin.json).
+  const intent = options.intent === true
 
-// The rules a blind A/B chose (plans/261012-0935-prompt-enhancer-ab/report.md): no skill names,
-// no questions back to the author, and the author's own terms copied verbatim into <intent>.
-const RULES = `Goal: rewrite the rough prompt below into a clear, complete prompt that an autonomous coding agent acts on in this project from start to finish.
-
-Success means the rewrite:
-1. Keeps the author's intent, scope and language, with requirements drawn only from what they asked for or clearly implied.
-2. States the kind of work and its domain: what is built, fixed, reviewed, researched or written, and the tools, file types, services and artifacts involved.
-3. Describes the finished result: the deliverable and how to tell it is done.
-4. Fits this project, using only the paths and facts its folder, files, conventions and the conversation show.
-5. Leaves skill choice to the agent's skill router: it names the work, and leaves skills, plugins, agents and slash commands unnamed.
-
-Output, in this order:
-- <intent></intent>: one or two plain sentences naming only the work and its domain. Copy the author's own names verbatim: tools, files, procedures, people, and any coined or misspelled term ("chisle" stays "chisle").
-- <prompt></prompt>: the rewritten prompt, in the author's voice, as the message they will send, in short sections or bullets.
-
-Stop after </prompt>.`
-
-const tag = (reply: string, name: string) => reply.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))?.[1]?.trim() ?? ''
-
-async function home($: EngineInterface): Promise<string> {
-  return (await $.env.get('HOME')) ?? ''
-}
-
-// The installed skill-concierge's enforcer, the same script its UserPromptSubmit hook runs.
-// SKILL_CONCIERGE_ROOT (a checkout) wins, so a development tree can be driven live.
-async function enforcerPath($: EngineInterface): Promise<string | null> {
-  const root = await $.env.get('SKILL_CONCIERGE_ROOT')
-  if (root) return `${root}/hooks/scripts/enforcer.py`
-  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await home($)}/.claude`
-  try {
-    const installed = JSON.parse(String(await $.fs.read(`${config}/plugins/installed_plugins.json`)))
-    for (const [id, entries] of Object.entries(installed.plugins ?? {})) {
-      const path = (entries as { installPath?: string }[])[0]?.installPath
-      if (id.startsWith('skill-concierge@') && path) return `${path}/hooks/scripts/enforcer.py`
-    }
-  } catch {
-    // No plugin registry: concierge is not installed, so there is no menu to show.
-  }
-  return null
-}
-
-// Ranks text exactly as concierge's hook does, with the ledger off: a preview is not an offer.
-export async function rankMenu($: EngineInterface, text: string): Promise<Menu> {
-  const script = await enforcerPath($)
-  if (!script) return { skills: [], note: 'skill-concierge is not installed' }
-  let context = ''
-  try {
-    const run = await $.process.run(['python3', script], {
-      stdin: JSON.stringify({ prompt: text, session_id: PREVIEW_SESSION }),
-      env: { ENFORCER_LEDGER: '0' },
-      timeoutMs: 20_000,
-    })
-    const out = run.stdout.trim().split('\n').pop() ?? ''
-    context = out ? (JSON.parse(out).hookSpecificOutput?.additionalContext ?? '') : ''
-  } catch {
-    // The rewrite already landed; a ranking that fails or times out only costs the preview.
-    return { skills: [], note: 'concierge returned no menu' }
-  }
-  // The main menu is the first run of bullet rows; the annexes after it are not the offer.
-  const skills: string[] = []
-  for (const line of context.split('\n').map(l => l.trim())) {
-    if (line.startsWith('• ')) {
-      const name = line.slice(2).split(/\s+/)[0]
-      if (name) skills.push(name)
-    } else if (skills.length) {
-      break
-    }
-  }
-  if (skills.length) return { skills, note: null }
-  if (context.includes('SKILL-CHECK:')) return { skills: [], note: 'concierge: no skill needed for this one' }
-  return { skills: [], note: 'concierge has no preview for this draft' }
-}
-
-async function rewrite($: EngineInterface, draft: string): Promise<{ prompt: string; intent: string }> {
-  const ask = `${RULES}\n\n<rough_prompt>\n${draft}\n</rough_prompt>`
-  let reply: string
-  const forked = await $.model.fork({ prompt: ask })
-  if (forked.isAnswered) {
-    reply = forked.text
-  } else {
-    if (forked.reason !== 'nothing-to-fork') throw new Error(`model call failed: ${forked.reason}`)
-    // A fresh session has no conversation to fork: ask with the project folder as the only context.
-    const done = await $.model.complete({
-      model: FALLBACK_MODEL,
-      system: `Project folder: ${await $.session.cwd()}`,
-      prompt: ask,
-      maxTokens: 4000,
-      timeoutMs: 120_000,
-    })
-    if (!done.isAnswered) throw new Error(`model call failed: ${done.reason}`)
-    reply = done.text
-  }
-  const prompt = tag(reply, 'prompt')
-  if (!prompt) throw new Error('the rewrite came back without a <prompt> block')
-  return { prompt, intent: tag(reply, 'intent') }
-}
-
-export async function enhance($: EngineInterface) {
-  if (await read($, isBusy)) return
-  const draft = (await $.prompt.read()).text
-  if (!draft.trim()) {
-    $.ui.toast('Type a prompt first')
-    return
-  }
-  await update($, isBusy, () => true)
-  await update($, note, () => null)
-  await update($, menu, () => null)
-  try {
-    const { prompt, intent } = await rewrite($, draft)
-    // The person may have kept typing; their newer draft wins over the rewrite.
-    if ((await $.prompt.read()).text !== draft) {
-      await update($, note, () => 'Draft changed while enhancing; rewrite discarded')
-      return
-    }
-    const filled = await $.prompt.fill({ text: prompt })
-    if (!filled.isFilled) throw new Error(`prompt box refused (${filled.refusal ?? 'unknown'})`)
-    // Concierge ranks the author's own words plus the intent line, never the full rewrite.
-    const route = intent ? `${draft}\n\n${intent}` : draft
-    await update($, pending, () => ({ rewrite: prompt, route }) satisfies Pending)
-    await update($, menu, () => ({ skills: [], note: 'ranking skills…' }))
-    const ranked = await rankMenu($, route)
-    // Sent while ranking: the prompt is gone, so its preview is too.
-    if ((await read($, pending))?.rewrite === prompt) await update($, menu, () => ranked)
-  } catch (err) {
-    await update($, note, () => `Enhance failed: ${err instanceof Error ? err.message : String(err)}`)
-  } finally {
-    await update($, isBusy, () => false)
-  }
-}
-
-// The route hint for a sent prompt: only when it is the pending rewrite, unedited. Pure, so it is
-// testable without a session; leaveRouteHint does the reading and the writing.
-export function routeHintFor(waiting: Pending | null, text: string, nowMs: number): { prompt: string; route: string; t: number } | null {
-  if (!waiting || text.trim() !== waiting.rewrite.trim()) return null
-  return { prompt: text, route: waiting.route, t: nowMs / 1000 }
-}
-
-// When the enhanced prompt is sent unedited, leave concierge a one-shot route hint, so the
-// model's menu is ranked on the same text the band previewed (hooks/scripts/enforcer.py _route_hint).
-// Any send consumes the pending rewrite; an edited prompt is ranked as sent.
-async function leaveRouteHint($: EngineInterface, text: string) {
-  const waiting = await read($, pending)
-  if (!waiting) return
-  await update($, pending, () => null)
-  await update($, menu, () => null)
-  const hint = routeHintFor(waiting, text, await $.clock.now())
-  if (!hint) return
-  await $.fs.write(`${await home($)}/.claude/skill-concierge/route-hints/${await $.session.id()}.json`, JSON.stringify(hint))
-}
-
-// The chord bound to Claude Code's abovePrompt:focus in the Chat context; null when unbound.
-async function readFocusKey($: EngineInterface): Promise<string | null> {
-  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await home($)}/.claude`
-  const chat: Record<string, string | null> = {}
-  try {
-    const file = JSON.parse(String(await $.fs.read(`${config}/keybindings.json`)))
-    for (const block of file.bindings ?? []) {
-      if (block.context === 'Chat') Object.assign(chat, block.bindings ?? {})
-    }
-  } catch {
-    // No readable keybindings.json: Claude Code's defaults apply.
-  }
-  const own = Object.keys(chat).find(chord => chat[chord] === 'abovePrompt:focus')
-  if (own) return own.toLowerCase()
-  return 'ctrl+x tab' in chat ? null : 'ctrl+x tab'
-}
-
-export const register: Register = on => {
+  // Work that outlives a dispatch is started from session.start (reference.md, "Work that
+  // outlives a dispatch"): the Speculator keeps this hook's `$` for the session's life.
   on('session.start', async ($, e, next) => {
-    const chord = await readFocusKey($)
-    await update($, focusKey, () => chord)
+    const started = await next(e)
+    speculator?.end()
+    try {
+      // `$` stays in this file: the validator follows it only into same-file functions, so the
+      // Speculator gets closures that spell each `$.noun.event(...)` here.
+      const enforcer = await locateEnforcer({
+        rootEnv: () => $.env.get('SKILL_CONCIERGE_ROOT'),
+        configEnv: () => $.env.get('CLAUDE_CONFIG_DIR'),
+        homeEnv: () => $.env.get('HOME'),
+        cwd: () => $.session.cwd(),
+        // Every settings source in precedence order, so the later one wins per plugin id; a source that
+        // cannot be read counts as holding nothing (an unreadable answer never switches the mod off).
+        enabledPlugins: async () => {
+          const merged: Record<string, unknown> = {}
+          for (const source of ['user', 'project', 'local', 'flag', 'policy'] as const) {
+            Object.assign(merged, enabledPluginsOf(await $.settings.read({ source }).catch(() => ({}))))
+          }
+          return merged
+        },
+        isFile: path =>
+          $.fs.stat(path).then(
+            stat => stat.kind === 'file',
+            () => false,
+          ),
+        readText: path => $.fs.read(path),
+      })
+      // No concierge install, or skill-concierge disabled in settings: the mod stays inert and concierge is unchanged.
+      speculator = enforcer
+        ? new Speculator(
+            {
+              readPrompt: () => $.prompt.read(),
+              sessionId: () => $.session.id(),
+              cwd: () => $.session.cwd(),
+              messages: () => $.session.messages(),
+              complete: (request, init) => $.model.complete(request, init),
+              spawn: request => $.process.spawn(request),
+              after: (ms, fn) => $.clock.after(ms, fn),
+              every: (ms, fn) => $.clock.every(ms, fn),
+              status: text => $.ui.status(text),
+            },
+            enforcer,
+            { intent },
+          )
+        : null
+    } catch {
+      speculator = null
+    }
+    return started
+  })
+
+  // The draft observer (probe P6: fires while typing, and the engine does not wait on it).
+  // Observe only: other plugins' suggestions pass through untouched.
+  on('prompt.autocomplete', ($, e, next) => {
+    speculator?.note(e.text)
     return next(e)
   })
 
-  // Enter in the prompt box is the only send: peers, notifications and plugins never consume the rewrite.
-  // A hook that fails is skipped and the prompt still goes out: the hint is never a gate.
-  on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind === 'composer') await leaveRouteHint($, e.text)
+  // A running turn changes the context Jev reads (the last assistant text), so nothing is ranked
+  // while one runs; the draft is ranked once it ends. A subagent's loop raises turn.complete too,
+  // with `agentId` set and no turn.start of its own: only the main loop's end resumes ranking.
+  on('turn.start', ($, e, next) => {
+    speculator?.working(true)
+    return next(e)
+  })
+  on('turn.complete', ($, e, next) => {
+    if (e.agentId === undefined) speculator?.working(false)
     return next(e)
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+  // Enter. `next(e)` runs the UserPromptSubmit command hooks (probe P5), concierge's enforcer
+  // among them. The event passes on exactly as received: no text rewrite, no added context.
+  // Only the person's own Enter is wrapped; notifications, peers and plugins pass straight through.
+  // This site can refuse a prompt, so it carries a `.catch`: a failure here lets the prompt go on.
+  on('prompt.submit', ($, e, next) =>
+    e.origin.kind === 'composer' && speculator ? speculator.send(e.text, () => next(e)) : next(e),
+  ).catch(($, e, next) => next(e))
 
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const busy = await read($, isBusy)
-    const message = await read($, note)
-    const shown = await read($, menu)
-    const chord = await read($, focusKey)
-    const keys = [chord, 'e enhance', 'esc back'].filter(Boolean).join(' · ')
-
-    return (
-      <Box flexDirection="column">
-        <Box>
-          <Text dimColor>Concierge </Text>
-          {busy ? (
-            <Text dimColor>Enhancing…</Text>
-          ) : (
-            <Box>
-              {/* Not awaited: a rewrite plus a ranking can outlast the 10s ui.press budget; isBusy guards re-entry. */}
-              <Button key="enhance" label="Enhance" hotkey="e" variant="primary" onPress={() => void enhance($)} />
-              {e.surface === 'terminal' ? <Text dimColor>  {keys}</Text> : null}
-            </Box>
-          )}
-          {message ? <Text dimColor> {message}</Text> : null}
-        </Box>
-        {shown ? (
-          <Text dimColor>
-            {shown.skills.length ? `Skill preview: ${shown.skills.join(' · ')}` : shown.note}
-          </Text>
-        ) : null}
-      </Box>
-    )
+  // `reason: 'clear'` raises session.end with no session.start after it, so the Speculator stays
+  // usable: end() only drops its timers, runs and status, and the next run reads the new session id.
+  on('session.end', ($, e, next) => {
+    speculator?.end()
+    return next(e)
   })
 }

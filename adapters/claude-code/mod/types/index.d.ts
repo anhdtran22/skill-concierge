@@ -1,17 +1,20 @@
-// The skills concierge would offer for the enhanced draft, as the band shows them.
-export type Menu = { skills: string[]; note: string | null }
+// concierge-enhancer v0.2 domain types. The mod adds no noun to `$` and keeps no `$.state`:
+// it draws nothing (no ui.render hook), so it has no drawing state to subscribe to.
 
-// An Enhance whose rewrite is in the prompt box: what to rank when that prompt is sent.
-export type Pending = { rewrite: string; route: string }
+// What concierge will offer for the current draft, as the speculative enforcer run decided it.
+// Parsed once, at the process boundary, from the enforcer's `skillConciergeSpeculation` object;
+// nothing past the parser sees the wire shape.
+export type Preview =
+  // The menu rows, in the order the model will read them. `wholeShelf` is true only when the run's
+  // ticket is "ranked" (the hook will serve this very menu, Jev's whole-shelf ranking); in every other
+  // state the hook ranks the sent text itself, so the line is marked "(preview)".
+  | { readonly kind: 'menu'; readonly skills: readonly string[]; readonly wholeShelf: boolean }
+  // An authorized skip (jev_skip, getaway, intent_skip): the model will be told no skill is needed.
+  | { readonly kind: 'no-skill' }
+  // The consult lane will route the turn to skill-concierge:consult.
+  | { readonly kind: 'consult' }
+  // A lane that shows the user nothing (refusal, self-reference, harness text, too short).
+  | { readonly kind: 'silent' }
 
-declare module 'claude-code' {
-  interface PluginState {
-    'concierge-enhancer': {
-      isBusy: boolean
-      note: string | null
-      menu: Menu | null
-      pending: Pending | null
-      focusKey: string | null
-    }
-  }
-}
+// The one-line status the mod pins under the prompt for a Preview; undefined clears it.
+export type StatusLine = string | undefined

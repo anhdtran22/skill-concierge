@@ -1,0 +1,8 @@
+{
+  "modules": ["./probe.ts"],
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "cat > \"$HOME/.tmp/ce-probe/cmd-stdin.json\"; env | grep -E '^CE_PROBE' > \"$HOME/.tmp/ce-probe/cmd-env.txt\"; printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"PROBE-CMD-CONTEXT-ALPHA\"}}'" } ] }
+    ]
+  }
+}
