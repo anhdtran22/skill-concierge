@@ -1,6 +1,6 @@
 # skill-concierge
 
-[![version](https://img.shields.io/badge/version-0.68.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.68.1-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://docs.claude.com/en/docs/claude-code)
 [![built on](https://img.shields.io/badge/built%20on-skill--search-orange.svg)](https://github.com/sowhan/skill-search)
@@ -142,7 +142,9 @@ deliberation-shaped turns there ("which skills should I use for X") via a
 concierge ▸ ui-styling · frontend-design · ak-test · writing-plans · ak-cook
 ```
 
-Press Enter as usual. When the ticket is ready, the model gets that same menu, ranked once. While you paused, the mod ran concierge's own `enforcer.py` on the draft, with your real session and transcript and Jev through jevd. That run left a ticket (`hooks/scripts/offer_ticket.py`). When the text you send is exactly that draft and the conversation has not moved on, the hook serves the ticket's Jev verdict instead of asking Jev again. When the ticket is ready at Enter, the usual Jev wait (about 2.7 s at the median) is already over. If you press Enter while the run is still ranking, the hook waits for it, but stops 3.5 s before its own Jev deadline and ranks live with the time left. The served rows are checked again at Enter: a skill you have blocklisted, kept off or lost from the catalogue since the draft settled is never served, and the hook ranks live instead. A ticket lives five minutes. The line says `(preview)` unless the ticket is ranked, because then the hook ranks the text itself and may build another menu. The mod makes at most three runs per composed prompt; sending the prompt (not a model turn starting or ending) begins a new count. It does nothing when skill-concierge is disabled in your settings at session start. Edit the draft and the line clears; send something else and the hook ranks it live, as before. Drafts under four words, slash commands and prompts from notifications are left alone. The ledger row of a served turn keeps the prompt as sent in `q` and adds `"via": "enhancer"`, a `spec` block (`st` is `ready`, `waited`, `stale`, `env`, `dead`, `late` or `unranked`) and `jev.src: "ticket"`.
+When the names do not fit, each one loses its middle and keeps both ends (`skill-…earch`); skills that still do not fit are counted as `+N`.
+
+Press Enter as usual. When the ticket is ready, the model gets that same menu, ranked once. While you paused, the mod ran concierge's own `enforcer.py` on the draft, with your real session and transcript and Jev through jevd. That run left a ticket (`hooks/scripts/offer_ticket.py`). When the text you send is exactly that draft and the conversation has not moved on, the hook serves the ticket's Jev verdict instead of asking Jev again. When the ticket is ready at Enter, the usual Jev wait (about 2.7 s at the median) is already over. If you press Enter while the run is still ranking, the hook waits for it, but stops 3.5 s before its own Jev deadline and ranks live with the time left. The served rows are checked again at Enter: a skill you have blocklisted, kept off or lost from the catalogue since the draft settled is never served, and the hook ranks live instead. A ticket lives five minutes. The line says `(preview)` unless the ticket is ranked, because then the hook ranks the text itself and may build another menu. The mod makes at most three runs per composed prompt, each one Jev ranking (normally two calls to jevd) killed at 12 s; only sending the prompt begins a new count, never a model turn, a notification or a `/clear`. It does nothing when skill-concierge is disabled in your settings at session start, even with `SKILL_CONCIERGE_ROOT` set. After `/reload-plugins` it starts again on your first draft. Edit the draft and the line clears; send something else and the hook ranks it live, as before. Drafts under four words, slash commands and prompts from notifications are left alone. The ledger row of a served turn keeps the prompt as sent in `q` and adds `"via": "enhancer"`, a `spec` block (`st` is `ready`, `waited`, `stale`, `env`, `dead`, `late` or `unranked`) and `jev.src: "ticket"`.
 
 The mod also has an `intent` option (off by default): a hidden one-line restatement of the draft, written by `haiku`, added to the text concierge ranks. It is off because two blind gates on 20 real prompts found no gain from it ([evidence](plans/261012-1206-concierge-enhancer-redesign/gate/)). Turn the hand-off off with `ENFORCER_TICKET=0`: the hook then ranks every turn live, while the mod keeps ranking drafts (and calling Jev) and marks every line `(preview)`. To stop that spend, turn off the mod's `enabled` option. The status line needs the terminal: the desktop app gets no preview.
 
@@ -413,7 +415,7 @@ gate in detail: [`enforcement-gate.md`](openwiki/architecture/enforcement-gate.m
 
 ## Status & roadmap
 
-Current release: `0.68.0` — **published**. Per-version history, including every release since
+Current release: `0.68.1` — **published**. Per-version history, including every release since
 `0.1.0`, lives in [`CHANGELOG.md`](CHANGELOG.md); the decisions behind them are in
 [`docs/adr/`](docs/adr/README.md). Per-epoch watch items (what to monitor after a release,
 triggers, env-first actions): [`docs/epoch-watch.md`](docs/epoch-watch.md) — the single canonical

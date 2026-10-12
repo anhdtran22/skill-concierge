@@ -3,6 +3,21 @@
 All notable changes to **skill-concierge**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and evolving.
 
+## [0.68.1] - 2026-10-12
+
+### Fixed
+- **`concierge-enhancer` 0.2.1: every skill fits the status line.** Plugin-namespaced names
+  (`skill-concierge:skill-search`) filled the line, so only two or three of the five showed. Names now share a fixed
+  budget; a name that must shrink loses its middle and keeps both ends (`skill-…earch`), and skills that still do not
+  fit are counted as `+N`. The model's menu keeps the full names.
+- **The mod starts after `/reload-plugins`.** It was built only in `session.start`, which fires once per session, so a
+  reload left it silent until the next session. The first draft after a reload now starts it.
+- **A disabled skill-concierge beats `SKILL_CONCIERGE_ROOT`.** 0.68.0 let that variable run a checkout even when every
+  `skill-concierge@*` id was disabled in the settings; the owner's "off" now wins.
+- **`/clear` no longer resets the run count.** Only sending the prompt starts a new count of three runs.
+
+The enforcer and `offer_ticket.py` are unchanged, so the v0.68.0 ledger epoch continues.
+
 ## [0.68.0] - 2026-10-12
 
 ### Changed

@@ -1,6 +1,6 @@
 {
   "name": "concierge-enhancer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Ranks your draft with skill-concierge while you type, so the skill menu the model reads is ready when you press Enter, and shows that menu on the line under the prompt. Draws nothing above the prompt, binds no key and never rewrites your prompt. Needs the skill-concierge plugin.",
   "author": {
     "name": "thinhkhuat"

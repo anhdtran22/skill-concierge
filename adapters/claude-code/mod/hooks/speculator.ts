@@ -195,10 +195,11 @@ export function installedEnforcers(
 /**
  * The installed skill-concierge's enforcer.py, or null when there is none or skill-concierge is off.
  *
- * SKILL_CONCIERGE_ROOT wins first: it names the checkout a developer is running (a `--plugin-dir`
- * copy the settings and the registry cannot see). Otherwise inert (null) when every
- * `skill-concierge@*` id the settings or the registry know is explicitly `false` in
- * `enabledPlugins`: no hook would deliver what a speculative run ranks. An id that is absent from
+ * Inert (null) first when every `skill-concierge@*` id the settings or the registry know is
+ * explicitly `false` in `enabledPlugins`: the owner's "off" beats everything, an environment
+ * variable included. Then SKILL_CONCIERGE_ROOT: it names the checkout a developer runs (a
+ * `--plugin-dir` copy the registry cannot see); a live drive of a checkout leaves the installed
+ * id enabled or absent rather than disabled. An id that is absent from
  * `enabledPlugins` counts as enabled, and so does an unreadable settings answer. Then
  * `installed_plugins.json` under CLAUDE_CONFIG_DIR (default ~/.claude): the highest-version entry
  * of an enabled id that applies to this cwd and whose enforcer.py exists. Whether that enforcer
@@ -206,17 +207,17 @@ export function installedEnforcers(
  */
 export async function locateEnforcer(ports: LocatePorts): Promise<Enforcer | null> {
   const { isFile } = ports
-  const root = (await ports.rootEnv())?.replace(/\/+$/, '')
-  if (root) {
-    const path = `${root}/hooks/scripts/enforcer.py`
-    if (await isFile(path)) return { argv: ['python3', path] }
-  }
   const enabled = await ports.enabledPlugins().catch((): Record<string, unknown> => ({}))
   const config = (await ports.configEnv()) || `${(await ports.homeEnv()) ?? ''}/.claude`
   const registry = await ports.readText(`${config}/plugins/installed_plugins.json`).catch(() => null)
   const known = new Set([...Object.keys(enabled).filter(id => id.startsWith(CONCIERGE_PREFIX)), ...registeredIds(registry ?? '')])
   const off = new Set([...known].filter(id => enabled[id] === false))
   if (known.size > 0 && off.size === known.size) return null
+  const root = (await ports.rootEnv())?.replace(/\/+$/, '')
+  if (root) {
+    const path = `${root}/hooks/scripts/enforcer.py`
+    if (await isFile(path)) return { argv: ['python3', path] }
+  }
   if (registry === null) return null
   const cwd = await ports.cwd().catch(() => undefined)
   for (const path of installedEnforcers(registry, { off, cwd })) {
@@ -271,6 +272,36 @@ export function parseSpeculation(stdout: string): Preview | 'incompatible' | nul
   return { kind: 'menu', skills: names, wholeShelf: wholeShelf === true && ticket === 'ranked' }
 }
 
+// The line shares a terminal row with the engine's own notices and the mod cannot read the width,
+// so it fits the names into a fixed budget. A name that must shrink loses its middle, never either
+// end (the owner's rule), and every name gets the same cap; only when even the shortest cap would
+// not fit are the last skills counted as "+N".
+const NAMES_BUDGET = 76
+const MIN_NAME = 9
+
+export function middleCut(name: string, cap: number): string {
+  if (name.length <= cap) return name
+  const head = Math.ceil((cap - 1) / 2)
+  const tail = cap - 1 - head
+  return `${name.slice(0, head)}…${name.slice(name.length - tail)}`
+}
+
+function fitNames(skills: readonly string[], suffix: string): string {
+  const budget = NAMES_BUDGET - suffix.length
+  for (let shown = skills.length; shown >= 1; shown--) {
+    const more = shown < skills.length ? ` +${skills.length - shown}` : ''
+    const room = budget - more.length - 3 * (shown - 1)
+    const names = skills.slice(0, shown)
+    const longest = Math.max(...names.map(name => name.length))
+    for (let cap = longest; cap >= Math.min(MIN_NAME, longest); cap--) {
+      if (names.reduce((sum, name) => sum + Math.min(name.length, cap), 0) <= room) {
+        return names.map(name => middleCut(name, cap)).join(' · ') + more + suffix
+      }
+    }
+  }
+  return middleCut(skills[0] ?? '', MIN_NAME) + (skills.length > 1 ? ` +${skills.length - 1}` : '') + suffix
+}
+
 /**
  * The status line for a Preview. Literal forms (tests assert them):
  *   menu, ranked ticket -> 'concierge ▸ ui-styling · frontend-design · ak-test'
@@ -284,7 +315,7 @@ export function statusFor(preview: Preview): StatusLine {
     case 'menu':
       return preview.skills.length === 0
         ? undefined
-        : `concierge ▸ ${preview.skills.join(' · ')}${preview.wholeShelf ? '' : ' (preview)'}`
+        : `concierge ▸ ${fitNames(preview.skills, preview.wholeShelf ? '' : ' (preview)')}`
     case 'no-skill':
       return 'concierge ▸ no skill needed'
     case 'consult':
@@ -388,13 +419,15 @@ export class Speculator {
     }
   }
 
-  /** The session ended (a /clear too) or the module is rebuilt: cancel the timer and every run. Idempotent. */
+  /**
+   * The session ended (a /clear too) or the module is rebuilt: cancel the timer and every run.
+   * Idempotent. The run count survives, so a /clear cannot buy a draft more runs: only a send resets it.
+   */
   end(): void {
     this.timer?.cancel()
     this.timer = null
     this.cancel()
     this.show(undefined, null)
-    this.runs = 0
     this.isWorking = false
     this.intents.clear()
   }

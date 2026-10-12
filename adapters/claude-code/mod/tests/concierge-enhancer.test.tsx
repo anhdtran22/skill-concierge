@@ -22,6 +22,7 @@ import {
   parseSpeculation,
   rankable,
   statusFor,
+  middleCut,
 } from '../hooks/speculator'
 
 const USAGE = {} as ModelUsage
@@ -470,6 +471,22 @@ test('The boundary parser and the status line', () => {
   expect(statusFor({ kind: 'menu', skills: ['a', 'b'], wholeShelf: false })).toBe('concierge ▸ a · b (preview)')
   expect(statusFor({ kind: 'menu', skills: ['a', 'b'], wholeShelf: true })).toBe('concierge ▸ a · b')
   expect(statusFor({ kind: 'menu', skills: [], wholeShelf: true })).toBeUndefined()
+  // The live line from Thinh's session: every name keeps both ends, the middle gives way.
+  const live = statusFor({
+    kind: 'menu',
+    skills: ['verify-as-claimed', 'agent-skills:using-agent-skills', 'skill-concierge:keep-on', 'skill-concierge:skill-search', 'skill-concierge:flywheel'],
+    wholeShelf: true,
+  })
+  expect(live).toBe('concierge ▸ verify…aimed · agent-…kills · skill-…ep-on · skill-…earch · skill-…wheel')
+  // Short names that fit are never cut.
+  expect(statusFor({ kind: 'menu', skills: ['ui-styling', 'ak-test'], wholeShelf: true })).toBe('concierge ▸ ui-styling · ak-test')
+  // The cut keeps the first and last characters of every name.
+  expect(middleCut('skill-concierge:skill-search', 9)).toBe('skil…arch')
+  expect(middleCut('abc', 9)).toBe('abc')
+  // Too many long names for even the shortest cap: the last ones are counted.
+  expect(
+    statusFor({ kind: 'menu', skills: Array.from({ length: 9 }, (_, i) => `skill-number-${i}-long-name`), wholeShelf: false }),
+  ).toMatch(/^concierge ▸ (skill…name · ){4,}skill…name \+\d \(preview\)$/)
   expect(statusFor({ kind: 'no-skill' })).toBe('concierge ▸ no skill needed')
   expect(statusFor({ kind: 'consult' })).toBe('concierge ▸ consult')
   expect(statusFor({ kind: 'silent' })).toBeUndefined()
@@ -658,20 +675,41 @@ test('A disabled install is skipped for an enabled one; an id absent from the se
   expect(fake.spawned[0]?.argv).toEqual(['python3', ENFORCER])   // the higher 9.0.0 is disabled, the enabled one runs
 })
 
-test('SKILL_CONCIERGE_ROOT runs a checkout even when every skill-concierge id is disabled; without it, all disabled is inert', async ($, on) => {
+test('Every skill-concierge id disabled beats SKILL_CONCIERGE_ROOT; with the id enabled, the checkout runs', async ($, on) => {
   const { fake, clock } = engine(on)
   fake.env.SKILL_CONCIERGE_ROOT = '/dev/skill-concierge'
   fake.files.add('/dev/skill-concierge/hooks/scripts/enforcer.py')
   fake.settings = { user: { enabledPlugins: { [ENABLED_KEY]: false } } }
   await start($)
   await type($, fake, DRAFT)
-  await clock.advance(SETTLE_MS)
-  expect(fake.spawned.length).toBe(1)
-  delete fake.env.SKILL_CONCIERGE_ROOT
+  await clock.advance(SETTLE_MS * 2)
+  expect(fake.spawned.length).toBe(0)   // the owner's "off" wins over an environment variable
+  fake.settings = { user: { enabledPlugins: { [ENABLED_KEY]: true } } }
   await start($)
   await type($, fake, `${DRAFT} again`)
-  await clock.advance(SETTLE_MS * 2)
-  expect(fake.spawned.length).toBe(1)
+  await clock.advance(SETTLE_MS)
+  expect(fake.spawned[0]?.argv).toEqual(['python3', '/dev/skill-concierge/hooks/scripts/enforcer.py'])
+})
+
+test('After a reload with no session.start, the first draft starts the mod; later drafts reuse it', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await type($, fake, DRAFT)            // no start($): a module reloaded mid-session never sees session.start
+  await clock.advance(SETTLE_MS)
+  expect(fake.spawned[0]?.argv).toEqual(['python3', ENFORCER])
+  await type($, fake, `${DRAFT} and more`)
+  await clock.advance(SETTLE_MS)
+  expect(fake.spawned.length).toBe(2)   // one Speculator, not one per keystroke
+})
+
+test('A /clear does not reset the run count: one composed prompt gets three runs however often it is cleared', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  for (let i = 0; i < 6; i++) {
+    await type($, fake, `${DRAFT} take ${i}`)
+    await clock.advance(SETTLE_MS)
+    await $.session.end({ reason: 'clear', sessionId: 'sess-42', resume: { id: 'sess-42' } })
+  }
+  expect(fake.spawned.length).toBe(3)
 })
 
 test('A project-scope install runs only inside its own project tree', () => {

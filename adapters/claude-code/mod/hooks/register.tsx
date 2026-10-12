@@ -4,14 +4,70 @@
 // while the person types (the enforcer's own path, Jev through jevd included), shows the result
 // on this plugin's own status line, and keeps the matching run alive across Enter so the
 // UserPromptSubmit hook can serve that same ranking. Every hook passes its event on unchanged.
-import type { Register } from 'claude-code'
+import type { Hook, Register } from 'claude-code'
 
 import { Speculator, enabledPluginsOf, locateEnforcer } from './speculator'
 
 // Runtime handles (a child process, a timer, an AbortController) cannot live in `$.state`, which
-// holds plain data. A hot reload drops this value together with the timers it armed, which is the
-// right end for both: the next session.start (or reload) builds a fresh one.
+// holds plain data. A hot reload drops this value together with the timers it armed; the next
+// session.start, or the first draft after a reload, builds a fresh one.
 let speculator: Speculator | null = null
+
+// Builds the Speculator for this session. Work that outlives a dispatch is started from
+// session.start (reference.md, "Work that outlives a dispatch"); the Speculator keeps that `$`.
+// session.start fires once per session, so a module reloaded mid-session (/reload-plugins, an
+// update) never sees it: the first draft observed after such a reload builds the Speculator instead.
+let booted = false
+
+async function boot($: Parameters<Hook<'session.start'>>[0], intent: boolean): Promise<void> {
+  booted = true
+  speculator?.end()
+  try {
+    // `$` stays in this file: the validator follows it only into same-file functions, so the
+    // Speculator gets closures that spell each `$.noun.event(...)` here.
+    const enforcer = await locateEnforcer({
+      rootEnv: () => $.env.get('SKILL_CONCIERGE_ROOT'),
+      configEnv: () => $.env.get('CLAUDE_CONFIG_DIR'),
+      homeEnv: () => $.env.get('HOME'),
+      cwd: () => $.session.cwd(),
+      // Every settings source in precedence order, so the later one wins per plugin id; a source that
+      // cannot be read counts as holding nothing (an unreadable answer never switches the mod off).
+      enabledPlugins: async () => {
+        const merged: Record<string, unknown> = {}
+        for (const source of ['user', 'project', 'local', 'flag', 'policy'] as const) {
+          Object.assign(merged, enabledPluginsOf(await $.settings.read({ source }).catch(() => ({}))))
+        }
+        return merged
+      },
+      isFile: path =>
+        $.fs.stat(path).then(
+          stat => stat.kind === 'file',
+          () => false,
+        ),
+      readText: path => $.fs.read(path),
+    })
+    // No concierge install, or skill-concierge disabled in settings: the mod stays inert and concierge is unchanged.
+    speculator = enforcer
+      ? new Speculator(
+          {
+            readPrompt: () => $.prompt.read(),
+            sessionId: () => $.session.id(),
+            cwd: () => $.session.cwd(),
+            messages: () => $.session.messages(),
+            complete: (request, init) => $.model.complete(request, init),
+            spawn: request => $.process.spawn(request),
+            after: (ms, fn) => $.clock.after(ms, fn),
+            every: (ms, fn) => $.clock.every(ms, fn),
+            status: text => $.ui.status(text),
+          },
+          enforcer,
+          { intent },
+        )
+      : null
+  } catch {
+    speculator = null
+  }
+}
 
 export const register: Register = (on, options) => {
   // The `enabled` option off: no hook is registered, so the mod does nothing and concierge ranks
@@ -20,63 +76,17 @@ export const register: Register = (on, options) => {
   // Off unless set: the intent gate did not beat the plain draft (see the `intent` option in plugin.json).
   const intent = options.intent === true
 
-  // Work that outlives a dispatch is started from session.start (reference.md, "Work that
-  // outlives a dispatch"): the Speculator keeps this hook's `$` for the session's life.
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    speculator?.end()
-    try {
-      // `$` stays in this file: the validator follows it only into same-file functions, so the
-      // Speculator gets closures that spell each `$.noun.event(...)` here.
-      const enforcer = await locateEnforcer({
-        rootEnv: () => $.env.get('SKILL_CONCIERGE_ROOT'),
-        configEnv: () => $.env.get('CLAUDE_CONFIG_DIR'),
-        homeEnv: () => $.env.get('HOME'),
-        cwd: () => $.session.cwd(),
-        // Every settings source in precedence order, so the later one wins per plugin id; a source that
-        // cannot be read counts as holding nothing (an unreadable answer never switches the mod off).
-        enabledPlugins: async () => {
-          const merged: Record<string, unknown> = {}
-          for (const source of ['user', 'project', 'local', 'flag', 'policy'] as const) {
-            Object.assign(merged, enabledPluginsOf(await $.settings.read({ source }).catch(() => ({}))))
-          }
-          return merged
-        },
-        isFile: path =>
-          $.fs.stat(path).then(
-            stat => stat.kind === 'file',
-            () => false,
-          ),
-        readText: path => $.fs.read(path),
-      })
-      // No concierge install, or skill-concierge disabled in settings: the mod stays inert and concierge is unchanged.
-      speculator = enforcer
-        ? new Speculator(
-            {
-              readPrompt: () => $.prompt.read(),
-              sessionId: () => $.session.id(),
-              cwd: () => $.session.cwd(),
-              messages: () => $.session.messages(),
-              complete: (request, init) => $.model.complete(request, init),
-              spawn: request => $.process.spawn(request),
-              after: (ms, fn) => $.clock.after(ms, fn),
-              every: (ms, fn) => $.clock.every(ms, fn),
-              status: text => $.ui.status(text),
-            },
-            enforcer,
-            { intent },
-          )
-        : null
-    } catch {
-      speculator = null
-    }
+    await boot($, intent)
     return started
   })
 
   // The draft observer (probe P6: fires while typing, and the engine does not wait on it).
   // Observe only: other plugins' suggestions pass through untouched.
   on('prompt.autocomplete', ($, e, next) => {
-    speculator?.note(e.text)
+    if (booted) speculator?.note(e.text)
+    else void boot($, intent).then(() => speculator?.note(e.text))
     return next(e)
   })
 
