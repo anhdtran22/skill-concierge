@@ -6,7 +6,7 @@
 // UserPromptSubmit hook can serve that same ranking. Every hook passes its event on unchanged.
 import type { Hook, Register } from 'claude-code'
 
-import { Speculator, enabledPluginsOf, locateEnforcer } from './speculator'
+import { SETTLE_MS, Speculator, enabledPluginsOf, locateEnforcer } from './speculator'
 
 // Runtime handles (a child process, a timer, an AbortController) cannot live in `$.state`, which
 // holds plain data. A hot reload drops this value together with the timers it armed; the next
@@ -19,7 +19,7 @@ let speculator: Speculator | null = null
 // update) never sees it: the first draft observed after such a reload builds the Speculator instead.
 let booted = false
 
-async function boot($: Parameters<Hook<'session.start'>>[0], intent: boolean): Promise<void> {
+async function boot($: Parameters<Hook<'session.start'>>[0], intent: boolean, settleMs: number): Promise<void> {
   booted = true
   speculator?.end()
   try {
@@ -61,7 +61,11 @@ async function boot($: Parameters<Hook<'session.start'>>[0], intent: boolean): P
             status: text => $.ui.status(text),
           },
           enforcer,
-          { intent },
+          {
+            intent,
+            settleMs,
+            ledger: `${((await $.env.get('SKILL_CONCIERGE_LOG')) || `${(await $.env.get('HOME')) ?? ''}/.claude/skill-concierge/logs`).replace(/\/+$/, '')}/skill-invocation-ledger.log`,
+          },
         )
       : null
   } catch {
@@ -75,10 +79,13 @@ export const register: Register = (on, options) => {
   if (options.enabled === false) return
   // Off unless set: the intent gate did not beat the plain draft (see the `intent` option in plugin.json).
   const intent = options.intent === true
+  // The pause before a draft is ranked, from /config (seconds); out of range or unset: SETTLE_MS.
+  const pause = typeof options.pauseSeconds === 'number' ? options.pauseSeconds : NaN
+  const settleMs = pause >= 0.5 && pause <= 30 ? Math.round(pause * 1000) : SETTLE_MS
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await boot($, intent)
+    await boot($, intent, settleMs)
     return started
   })
 
@@ -86,7 +93,7 @@ export const register: Register = (on, options) => {
   // Observe only: other plugins' suggestions pass through untouched.
   on('prompt.autocomplete', ($, e, next) => {
     if (booted) speculator?.note(e.text)
-    else void boot($, intent).then(() => speculator?.note(e.text))
+    else void boot($, intent, settleMs).then(() => speculator?.note(e.text))
     return next(e)
   })
 

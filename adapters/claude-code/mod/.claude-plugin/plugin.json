@@ -12,6 +12,12 @@
       "description": "Off: the mod does nothing, and skill-concierge ranks each prompt when you send it, as without this mod. On: a settled draft of four words or more is sent to skill-concierge's ranker before you press Enter.",
       "default": true
     },
+    "pauseSeconds": {
+      "type": "number",
+      "title": "Pause before ranking (seconds)",
+      "description": "How long a draft of four words or more must stay still before it is ranked. Default 2. Shorter shows the menu sooner but can rank a half-finished sentence; the mod ranks at most once per prompt, and concierge ranks again at Enter if the draft changed.",
+      "default": 2
+    },
     "intent": {
       "type": "boolean",
       "title": "Add a one-line intent to the ranking",

@@ -14,7 +14,15 @@ All notable changes to **skill-concierge**. Format loosely follows
   reload left it silent until the next session. The first draft after a reload now starts it.
 - **A disabled skill-concierge beats `SKILL_CONCIERGE_ROOT`.** 0.68.0 let that variable run a checkout even when every
   `skill-concierge@*` id was disabled in the settings; the owner's "off" now wins.
-- **`/clear` no longer resets the run count.** Only sending the prompt starts a new count of three runs.
+- **At most two Jev rankings per prompt.** The mod ranks a draft once per composed prompt, after it has been still for
+  two seconds (it was three runs after one second); concierge ranks again at Enter only if the draft changed after that
+  run. Only sending the prompt starts a new count: a model turn, a notification or a `/clear` does not.
+- **New option `pauseSeconds`** (default 2, accepted 0.5–30) sets that pause from the plugin's settings.
+
+### Added
+- **The line shows the menu the model got.** After each Enter the status line reads `concierge ✓ …`: the rows of the
+  offer the hook wrote for that turn, read from the tail of concierge's ledger, so every turn shows its real menu at no
+  extra Jev call. It stays while Claude works and clears when you start typing.
 
 The enforcer and `offer_ticket.py` are unchanged, so the v0.68.0 ledger epoch continues.
 

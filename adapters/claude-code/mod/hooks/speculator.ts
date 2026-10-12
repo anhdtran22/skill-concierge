@@ -25,7 +25,7 @@ import type { Preview, StatusLine } from '../types'
 
 // ── Tunables. Each is a decision with its evidence status; none is measured yet. ───────────────
 // Quiet time after the last keystroke before a draft counts as settled.
-export const SETTLE_MS = 1_000
+export const SETTLE_MS = 2_000
 // Optimization only: the enforcer's MAX_SHORT_WORDS (3) is the authority and drops shorter
 // prompts itself. A drift between the two costs a wasted spawn or a missed speculation, never a
 // wrong menu. tests/test_offer_ticket.py pins the Python side of this pair.
@@ -33,7 +33,7 @@ export const MIN_WORDS = 4
 // Cost cap: enforcer runs (each one intent call plus up to two Jev calls) per composed prompt. A
 // composed prompt ends when the person sends it (composer Enter) or the session ends; a model turn
 // starting or ending does not end it, because the draft in the box is still the same prompt.
-export const MAX_RUNS_PER_DRAFT = 3
+export const MAX_RUNS_PER_DRAFT = 1
 // The intent call's whole budget; past it the draft is ranked without an intent line.
 export const INTENT_TIMEOUT_MS = 2_500
 // The speculative run's kill switch: above the enforcer's 7.8 s Jev cap plus start-up and annexes.
@@ -72,7 +72,8 @@ export const SPECULATION_ENV: Readonly<Record<string, string>> = {
 // hooks/hooks.json runs plain `python3`: the speculation must run the same interpreter.
 export type Enforcer = { readonly argv: readonly [string, string] }
 
-export type SpeculatorOptions = { readonly intent: boolean }
+// `ledger`: concierge's ledger file; after each send the line shows the offer row the hook wrote there.
+export type SpeculatorOptions = { readonly intent: boolean; readonly ledger?: string; readonly settleMs?: number }
 
 // One speculative run: the draft it ranks, how to stop it, and what it decided.
 type Job = {
@@ -302,6 +303,45 @@ function fitNames(skills: readonly string[], suffix: string): string {
   return middleCut(skills[0] ?? '', MIN_NAME) + (skills.length > 1 ? ` +${skills.length - 1}` : '') + suffix
 }
 
+// How much of the ledger's tail the sent-menu read scans, and how long it may take.
+export const SENT_TAIL_LINES = 400
+export const SENT_READ_MS = 2_000
+
+type OfferRow = { readonly band?: unknown; readonly offered?: unknown }
+
+/** The last offer row in `tail` (JSON lines) for this session and this sent text, or null. */
+export function findOffer(tail: string, sid: string, sent: string): OfferRow | null {
+  const q = sent.slice(0, 120)
+  const lines = tail.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const row = JSON.parse(lines[i] ?? '') as Record<string, unknown>
+      if (row.ev === 'offer' && row.sid === sid && row.q === q) return row
+    } catch {
+      // not a JSON row
+    }
+  }
+  return null
+}
+
+/**
+ * The status line for the menu the model got. Literal forms (tests assert them):
+ *   offered rows        -> 'concierge ✓ ui-styling · frontend-design'
+ *   a skip band, none   -> 'concierge ✓ no skill needed'
+ *   consult route       -> 'concierge ✓ consult'
+ *   no row, other bands -> undefined
+ */
+export function sentStatus(row: OfferRow | null): StatusLine {
+  if (row === null) return undefined
+  const names = Array.isArray(row.offered)
+    ? row.offered.map(o => (Array.isArray(o) ? o[0] : o)).filter((n): n is string => typeof n === 'string' && n !== '')
+    : []
+  if (names.length > 0) return `concierge ✓ ${fitNames(names, '')}`
+  if (row.band === 'consult_route') return 'concierge ✓ consult'
+  if (row.band === 'jev_skip' || row.band === 'getaway' || row.band === 'intent_skip') return 'concierge ✓ no skill needed'
+  return undefined
+}
+
 /**
  * The status line for a Preview. Literal forms (tests assert them):
  *   menu, ranked ticket -> 'concierge ▸ ui-styling · frontend-design · ak-test'
@@ -364,7 +404,7 @@ export class Speculator {
     this.timer = null
     if (this.job && this.job.draft !== d) this.cancel()
     if (this.incompatible || this.isWorking || !rankable(d)) return
-    this.timer = this.p.after(SETTLE_MS, () => void this.settle())
+    this.timer = this.p.after(this.options.settleMs ?? SETTLE_MS, () => void this.settle())
   }
 
   /**
@@ -379,7 +419,7 @@ export class Speculator {
       this.timer?.cancel()
       this.timer = null
       this.cancel()
-      this.show(undefined, null)
+      if (this.shownFor !== '') this.show(undefined, null)   // a preview goes; the sent menu ('') stays
       return   // `runs` is kept: the draft is still the same composed prompt
     }
     void this.p.readPrompt().then(
@@ -402,8 +442,8 @@ export class Speculator {
    * 4. After `go()` settles (the command hooks are done), every run is cancelled.
    */
   async send<R>(text: string, go: () => Promise<R>): Promise<R> {
+    const sent = text.trim()
     try {
-      const sent = text.trim()
       if (this.job && (this.job.draft !== sent || this.job.stream === null)) this.cancel()
       this.timer?.cancel()
       this.timer = null
@@ -416,6 +456,36 @@ export class Speculator {
       return await go()
     } finally {
       this.cancel()
+      void this.showSent(sent)
+    }
+  }
+
+  /**
+   * After a send: the menu the model actually got, read from the offer row the hook wrote for
+   * this session and this text (the tail of concierge's ledger; no Jev call). Shown as
+   * `concierge ✓ …` while the box stays empty; typing clears it. Never throws.
+   */
+  private async showSent(sent: string): Promise<void> {
+    const ledger = this.options.ledger
+    if (!ledger) return
+    try {
+      const sid = await this.p.sessionId()
+      const stream = this.p.spawn({ argv: ['tail', '-n', String(SENT_TAIL_LINES), ledger] })
+      const kill = this.p.after(SENT_READ_MS, () => void stream.return?.(undefined as never))
+      let out = ''
+      try {
+        for (;;) {
+          const step = await stream.next()
+          if (step.done) break
+          if (step.value.stream === 'stdout') out += step.value.text
+        }
+      } finally {
+        kill.cancel()
+      }
+      const line = sentStatus(findOffer(out, sid, sent))
+      if (line !== undefined && (await this.p.readPrompt()).text.trim() === '') this.show(line, '')
+    } catch {
+      // Display only: a missing or unreadable ledger leaves the line empty.
     }
   }
 

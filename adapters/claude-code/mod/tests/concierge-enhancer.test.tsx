@@ -18,9 +18,11 @@ import {
   WATCH_MS,
   compareVersions,
   enabledPluginsOf,
+  findOffer,
   installedEnforcers,
   parseSpeculation,
   rankable,
+  sentStatus,
   statusFor,
   middleCut,
 } from '../hooks/speculator'
@@ -41,6 +43,9 @@ const RANKED = JSON.stringify({
   },
 })
 const MENU_STATUS = 'concierge ▸ ui-styling · frontend-design · ak-test'
+const LEDGER = `${HOME}/.claude/skill-concierge/logs/skill-invocation-ledger.log`
+const SENT_STATUS = 'concierge ✓ ui-styling · frontend-design'
+const offerRow = (extra: Record<string, unknown> = {}) => JSON.stringify({ ev: 'offer', sid: 'sess-42', q: DRAFT, ...extra })
 
 type Spawn = { argv: readonly string[]; env: Record<string, string>; input: string }
 type Fake = {
@@ -63,6 +68,12 @@ type Fake = {
   submitted: { e: unknown; killed: number }[]
   // While set, the intent call waits for it.
   intentGate: Promise<void> | null
+  // The ledger tail the `tail` child answers, the argv of each tail read, and how many were answered.
+  ledger: string
+  tails: (readonly string[])[]
+  tailsAnswered: number
+  // While set, the tail child waits for it.
+  tailGate: Promise<void> | null
 }
 
 // Stands in for the prompt box, the session, the small model, the plugin registry, the enforcer
@@ -87,6 +98,10 @@ function engine(on: On) {
     messages: [{ role: 'assistant', text: 'Earlier answer about the build.', toolUses: [] }],
     submitted: [],
     intentGate: null,
+    ledger: '',
+    tails: [],
+    tailsAnswered: 0,
+    tailGate: null,
   }
   on('prompt.read', () => ({ value: { text: fake.box, cursor: fake.box.length } }))
   on('session.id', () => ({ value: 'sess-42' }))
@@ -124,6 +139,14 @@ function engine(on: On) {
     return { text: e.text, context: e.context }
   })
   on('process.spawn', async function* (_$, e, next): AsyncGenerator<ProcessSpawnChunk, { value: ProcessSpawnResult }, void> {
+    if (e.argv[0] === 'tail') {
+      // The sent-menu read of concierge's ledger: not an enforcer run, so it is kept apart from `spawned`.
+      fake.tails.push(e.argv)
+      await fake.tailGate
+      fake.tailsAnswered++
+      if (fake.ledger) yield { stream: 'stdout' as const, text: fake.ledger }
+      return { value: { code: 0, signal: null } }
+    }
     fake.spawned.push({ argv: e.argv, env: e.env ?? {}, input: e.input ?? '' })
     let isDead = false
     let release = (): void => undefined
@@ -179,7 +202,7 @@ test('A settled draft is sent once to the enforcer as a speculation request and 
     speculate: { intent: '', n: 1 },
   })
   expect(fake.status.at(-1)).toBe(MENU_STATUS)
-  expect(SETTLE_MS).toBe(1000)
+  expect(SETTLE_MS).toBe(2000)
 })
 
 test('The intent option is off by default: no model call, an empty intent', async ($, on) => {
@@ -215,11 +238,13 @@ test('An over-long intent is cut and a failed or slow intent call ranks the draf
   await type($, fake, DRAFT)
   await clock.advance(SETTLE_MS)
   expect(JSON.parse(fake.spawned[0]?.input ?? '{}').speculate.intent).toBe('x'.repeat(INTENT_MAX_CHARS))
+  // A send ends the composed prompt, so the next draft is a new prompt with a run of its own.
+  await $.prompt.submit(composer(DRAFT))
   fake.intent = { isAnswered: false, reason: 'aborted', usage: USAGE }
   await type($, fake, `${DRAFT} please`)
   await clock.advance(SETTLE_MS)
   expect(fake.spawned.length).toBe(2)
-  expect(JSON.parse(fake.spawned[1]?.input ?? '{}').speculate).toEqual({ intent: '', n: 2 })
+  expect(JSON.parse(fake.spawned[1]?.input ?? '{}').speculate).toEqual({ intent: '', n: 1 })
 })
 
 test('The intent rules name no skills, keep the author terms verbatim and ask the author nothing', () => {
@@ -229,7 +254,7 @@ test('The intent rules name no skills, keep the author terms verbatim and ask th
   expect(INTENT_RULES).not.toMatch(/\b(ask|asks|asking|questions?)\b/i)
 })
 
-test('Typing again before the settle time ranks nothing; typing after a run starts kills it and ranks the new draft', async ($, on) => {
+test('Typing again before the settle time ranks nothing; typing after a run starts kills it, and the next prompt is ranked after a send', async ($, on) => {
   const { fake, clock } = engine(on)
   fake.hold = true
   await start($)
@@ -244,9 +269,14 @@ test('Typing again before the settle time ranks nothing; typing after a run star
   await type($, fake, `${DRAFT} and a toggle in the header`)
   expect(fake.killed).toBe(1)
   expect(fake.status).toEqual([])
+  // One automatic run per composed prompt: the edited draft is not ranked again until a send.
+  await clock.advance(SETTLE_MS)
+  expect(fake.spawned.length).toBe(1)
+  await $.prompt.submit(composer(`${DRAFT} and a toggle in the header`))
+  await type($, fake, `${DRAFT} and a toggle in the footer`)
   await clock.advance(SETTLE_MS)
   expect(fake.spawned.length).toBe(2)
-  expect(JSON.parse(fake.spawned[1]?.input ?? '{}').prompt).toBe(`${DRAFT} and a toggle in the header`)
+  expect(JSON.parse(fake.spawned[1]?.input ?? '{}').prompt).toBe(`${DRAFT} and a toggle in the footer`)
   fake.finish()
   await clock.settle()
   expect(fake.status).toEqual([MENU_STATUS])
@@ -394,21 +424,21 @@ test('The submitted prompt passes through untouched: same text, no added context
   expect(fake.submitted[1]?.e).toEqual(peer)
 })
 
-test('Enter resets the per-prompt run count; at most three runs per composed prompt', async ($, on) => {
+test('Enter resets the per-prompt run count; at most one run per composed prompt', async ($, on) => {
   const { fake, clock } = engine(on)
   await start($)
-  expect(MAX_RUNS_PER_DRAFT).toBe(3)
+  expect(MAX_RUNS_PER_DRAFT).toBe(1)
   for (const tail of ['one', 'two', 'three', 'four']) {
     await type($, fake, `${DRAFT} ${tail}`)
     await clock.advance(SETTLE_MS)
   }
-  expect(fake.spawned.length).toBe(3)
-  expect(fake.spawned.map(s => JSON.parse(s.input).speculate.n)).toEqual([1, 2, 3])
+  expect(fake.spawned.length).toBe(1)
+  expect(fake.spawned.map(s => JSON.parse(s.input).speculate.n)).toEqual([1])
   await $.prompt.submit(composer(`${DRAFT} four`))
   await type($, fake, `${DRAFT} five`)
   await clock.advance(SETTLE_MS)
-  expect(fake.spawned.length).toBe(4)
-  expect(JSON.parse(fake.spawned[3]?.input ?? '{}').speculate.n).toBe(1)
+  expect(fake.spawned.length).toBe(2)
+  expect(JSON.parse(fake.spawned[1]?.input ?? '{}').speculate.n).toBe(1)
 })
 
 test('A run past its kill time is killed', async ($, on) => {
@@ -446,9 +476,15 @@ test('A session.end (a /clear) drops the line and the run, and ranking works aga
   expect(fake.status).toEqual([MENU_STATUS])
   await $.session.end({ reason: 'clear', sessionId: 'sess-42', resume: { id: 'sess-42' } })
   expect(fake.status).toEqual([MENU_STATUS, undefined])
+  // The /clear does not end the composed prompt: its one run is spent, so nothing is ranked until a send.
   await type($, fake, `${DRAFT} after the clear`)
   await clock.advance(SETTLE_MS)
+  expect(fake.spawned.length).toBe(1)
+  await $.prompt.submit(composer(`${DRAFT} after the clear`))
+  await type($, fake, `${DRAFT} after the send`)
+  await clock.advance(SETTLE_MS)
   expect(fake.spawned.length).toBe(2)
+  expect(JSON.parse(fake.spawned[1]?.input ?? '{}').prompt).toBe(`${DRAFT} after the send`)
   expect(fake.status.at(-1)).toBe(MENU_STATUS)
 })
 
@@ -602,7 +638,7 @@ test('Beside a peer band mod both work: its band, hotkey and context survive, ou
 
 // ── The per-prompt cost cap holds across notification turns ───────────────────────────────────────
 
-test('One unchanged draft across several notification turns starts at most three runs', async ($, on) => {
+test('One unchanged draft across several notification turns starts at most one run', async ($, on) => {
   const { fake, clock } = engine(on)
   await start($)
   await type($, fake, DRAFT)
@@ -614,8 +650,9 @@ test('One unchanged draft across several notification turns starts at most three
     await clock.advance(SETTLE_MS)
   }
   expect(fake.spawned.length).toBe(MAX_RUNS_PER_DRAFT)
-  expect(fake.spawned.map(s => JSON.parse(s.input).speculate.n)).toEqual([1, 2, 3])
-  // Sending ends the composed prompt: the next one gets its own three.
+  expect(MAX_RUNS_PER_DRAFT).toBe(1)
+  expect(fake.spawned.map(s => JSON.parse(s.input).speculate.n)).toEqual([1])
+  // Sending ends the composed prompt: the next one gets its own run.
   await $.prompt.submit(composer(DRAFT))
   await type($, fake, `${DRAFT} next prompt`)
   await clock.advance(SETTLE_MS)
@@ -696,12 +733,18 @@ test('After a reload with no session.start, the first draft starts the mod; late
   await type($, fake, DRAFT)            // no start($): a module reloaded mid-session never sees session.start
   await clock.advance(SETTLE_MS)
   expect(fake.spawned[0]?.argv).toEqual(['python3', ENFORCER])
+  // One Speculator, not one per keystroke: a fresh one per draft would have a fresh run count and rank again.
   await type($, fake, `${DRAFT} and more`)
   await clock.advance(SETTLE_MS)
-  expect(fake.spawned.length).toBe(2)   // one Speculator, not one per keystroke
+  expect(fake.spawned.length).toBe(1)
+  await $.prompt.submit(composer(`${DRAFT} and more`))
+  await type($, fake, `${DRAFT} and more still`)
+  await clock.advance(SETTLE_MS)
+  expect(fake.spawned.length).toBe(2)
+  expect(JSON.parse(fake.spawned[1]?.input ?? '{}').speculate.n).toBe(1)
 })
 
-test('A /clear does not reset the run count: one composed prompt gets three runs however often it is cleared', async ($, on) => {
+test('A /clear does not reset the run count: one composed prompt gets one run however often it is cleared', async ($, on) => {
   const { fake, clock } = engine(on)
   await start($)
   for (let i = 0; i < 6; i++) {
@@ -709,7 +752,7 @@ test('A /clear does not reset the run count: one composed prompt gets three runs
     await clock.advance(SETTLE_MS)
     await $.session.end({ reason: 'clear', sessionId: 'sess-42', resume: { id: 'sess-42' } })
   }
-  expect(fake.spawned.length).toBe(3)
+  expect(fake.spawned.length).toBe(1)
 })
 
 test('A project-scope install runs only inside its own project tree', () => {
@@ -731,4 +774,155 @@ test('A project-scope install runs only inside its own project tree', () => {
   expect(enabledPluginsOf({ enabledPlugins: { a: false } })).toEqual({ a: false })
   expect(enabledPluginsOf({ enabledPlugins: ['x'] })).toEqual({})
   expect(enabledPluginsOf(undefined)).toEqual({})
+})
+
+// ── The menu the model got: read from the ledger after each send ──────────────────────────────────
+
+// Rows that must never be picked: another session, another text, a non-offer event, a torn line.
+const NOISE = [
+  offerRow({ sid: 'sess-other', offered: [['wrong-sid', 0.9]] }),
+  offerRow({ q: 'some other prompt entirely', offered: [['wrong-text', 0.9]] }),
+  JSON.stringify({ ev: 'search', sid: 'sess-42', q: DRAFT, offered: [['wrong-ev', 0.9]] }),
+  '{"ev":"offer","sid":"sess-42"',
+]
+// An older row for this prompt, then the one the hook wrote last (mixed [name, score] and bare-name shapes).
+const OLD_ROW = offerRow({ band: 'offer', offered: [['stale-skill', 0.5]] })
+const NEW_ROW = offerRow({ band: 'offer', offered: [['ui-styling', 0.91], 'frontend-design'] })
+
+test('After a send the status line shows the menu the model got, read from the ledger tail', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.ledger = [OLD_ROW, NEW_ROW, ...NOISE].join('\n') + '\n'
+  await start($)
+  await $.prompt.submit(composer(DRAFT))
+  await clock.settle()
+  expect(fake.tails).toEqual([['tail', '-n', '400', LEDGER]])
+  expect(fake.spawned.length).toBe(0)
+  expect(fake.status).toEqual([SENT_STATUS])
+})
+
+test('A send with no matching offer row shows no line', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.ledger = NOISE.join('\n') + '\n'
+  await start($)
+  await $.prompt.submit(composer(DRAFT))
+  await clock.settle()
+  expect(fake.tails.length).toBe(1)
+  expect(fake.status).toEqual([])
+})
+
+test('A skip band with no rows shows "no skill needed" on the line', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.ledger = [...NOISE, offerRow({ band: 'jev_skip', offered: [] })].join('\n') + '\n'
+  await start($)
+  await $.prompt.submit(composer(DRAFT))
+  await clock.settle()
+  expect(fake.status).toEqual(['concierge ✓ no skill needed'])
+})
+
+test('Typing after the send clears the sent line', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.ledger = NEW_ROW
+  await start($)
+  await $.prompt.submit(composer(DRAFT))
+  await clock.settle()
+  expect(fake.status).toEqual([SENT_STATUS])
+  await type($, fake, 'n')
+  expect(fake.status).toEqual([SENT_STATUS, undefined])
+})
+
+test('A turn starting keeps the sent line while the box is empty', async ($, on) => {
+  const { fake, clock } = engine(on)
+  fake.ledger = NEW_ROW
+  await start($)
+  await $.prompt.submit(composer(DRAFT))
+  await clock.settle()
+  await $.turn.start({ text: DRAFT, turnId: 't1' })
+  await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(WATCH_MS * 3)
+  expect(fake.status).toEqual([SENT_STATUS])
+})
+
+test('The ledger tail read never blocks the send', async ($, on) => {
+  const { fake, clock } = engine(on)
+  let release = (): void => undefined
+  fake.tailGate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  fake.ledger = NEW_ROW
+  await start($)
+  await $.prompt.submit(composer(DRAFT))
+  // The hooks beneath ran and the send resolved while the tail child is still parked.
+  expect(fake.submitted.length).toBe(1)
+  expect(fake.tailsAnswered).toBe(0)
+  expect(fake.status).toEqual([])
+  release()
+  await clock.settle()
+  expect(fake.tailsAnswered).toBe(1)
+  expect(fake.status).toEqual([SENT_STATUS])
+})
+
+test('findOffer picks the last offer row for the session and the text cut to 120 chars; sentStatus words each case', () => {
+  const long = 'x'.repeat(130)
+  const rows = [
+    JSON.stringify({ ev: 'offer', sid: 's1', q: 'hello there', band: 'offer', offered: [['first', 1]] }),
+    JSON.stringify({ ev: 'offer', sid: 's1', q: 'hello there', band: 'offer', offered: [['second', 1]] }),
+    JSON.stringify({ ev: 'offer', sid: 's2', q: 'hello there', band: 'offer', offered: [['other-sid', 1]] }),
+    JSON.stringify({ ev: 'offer', sid: 's1', q: 'x'.repeat(120), band: 'getaway', offered: [] }),
+    'not json',
+  ].join('\n')
+  expect(findOffer(rows, 's1', 'hello there')).toEqual({ ev: 'offer', sid: 's1', q: 'hello there', band: 'offer', offered: [['second', 1]] })
+  expect(findOffer(rows, 's1', long)).toEqual({ ev: 'offer', sid: 's1', q: 'x'.repeat(120), band: 'getaway', offered: [] })
+  expect(findOffer(rows, 's3', 'hello there')).toBeNull()
+  expect(findOffer(rows, 's1', 'hello')).toBeNull()
+  expect(findOffer('', 's1', 'hello there')).toBeNull()
+
+  expect(sentStatus(null)).toBeUndefined()
+  expect(sentStatus({ band: 'offer', offered: [['ui-styling', 0.9], 'frontend-design', ['', 0.1]] })).toBe('concierge ✓ ui-styling · frontend-design')
+  // Rows win over a skip band; the same middle cut as the preview line.
+  expect(sentStatus({ band: 'jev_skip', offered: ['a', 'b'] })).toBe('concierge ✓ a · b')
+  expect(
+    sentStatus({ offered: ['verify-as-claimed', 'agent-skills:using-agent-skills', 'skill-concierge:keep-on', 'skill-concierge:skill-search', 'skill-concierge:flywheel'] }),
+  ).toBe('concierge ✓ verify…aimed · agent-…kills · skill-…ep-on · skill-…earch · skill-…wheel')
+  for (const band of ['jev_skip', 'getaway', 'intent_skip']) {
+    expect(sentStatus({ band, offered: [] })).toBe('concierge ✓ no skill needed')
+  }
+  expect(sentStatus({ band: 'jev_skip' })).toBe('concierge ✓ no skill needed')
+  expect(sentStatus({ band: 'consult_route', offered: [] })).toBe('concierge ✓ consult')
+  expect(sentStatus({ band: 'harness_skip', offered: [] })).toBeUndefined()
+  expect(sentStatus({ band: 'offer', offered: 'ui-styling' })).toBeUndefined()
+  expect(sentStatus({})).toBeUndefined()
+})
+
+// ── The pause before ranking is the pauseSeconds option ───────────────────────────────────────────
+
+test('pauseSeconds 3.5 ranks after exactly 3500 ms and not before', { options: { pauseSeconds: 3.5 } }, async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(3499)
+  expect(fake.spawned.length).toBe(0)
+  await clock.advance(1)
+  expect(fake.spawned.length).toBe(1)
+})
+
+for (const pauseSeconds of [0.1, 99]) {
+  test(`pauseSeconds ${pauseSeconds} is out of range and falls back to 2000 ms`, { options: { pauseSeconds } }, async ($, on) => {
+    const { fake, clock } = engine(on)
+    await start($)
+    await type($, fake, DRAFT)
+    await clock.advance(1999)
+    expect(fake.spawned.length).toBe(0)
+    await clock.advance(1)
+    expect(fake.spawned.length).toBe(1)
+  })
+}
+
+test('pauseSeconds unset ranks after 2000 ms', async ($, on) => {
+  const { fake, clock } = engine(on)
+  await start($)
+  await type($, fake, DRAFT)
+  await clock.advance(1999)
+  expect(fake.spawned.length).toBe(0)
+  await clock.advance(1)
+  expect(fake.spawned.length).toBe(1)
 })
