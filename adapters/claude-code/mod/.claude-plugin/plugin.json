@@ -1,0 +1,7 @@
+{
+  "name": "concierge-enhancer",
+  "version": "0.1.0",
+  "description": "A band above the Claude Code prompt that sharpens your draft in place and previews the skills skill-concierge ranks for it, before you send.",
+  "author": { "name": "thinhkhuat" },
+  "types": "./types/index.d.ts"
+}

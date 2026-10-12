@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Skill-governance layer for Claude Code, Codex, Command Code, Oh My Pi, ZCode, and DeepSeek Harness — semantic retrieval + use-enforcement + invocation ledger.",
-    "version": "0.66.4"
+    "version": "0.67.0"
   },
   "plugins": [
     {
@@ -20,7 +20,18 @@
         "hooks",
         "telemetry"
       ],
-      "version": "0.66.4"
+      "version": "0.67.0"
+    },
+    {
+      "name": "concierge-enhancer",
+      "source": "./adapters/claude-code/mod",
+      "description": "Claude Code mod: a band above the prompt that sharpens your draft in place and previews the skills skill-concierge ranks for it, before you send. Needs the skill-concierge plugin.",
+      "category": "developer-tools",
+      "tags": [
+        "skills",
+        "prompt",
+        "mod"
+      ]
     }
   ]
 }

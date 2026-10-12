@@ -3,6 +3,29 @@
 All notable changes to **skill-concierge**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and evolving.
 
+## [0.67.0] - 2026-10-12
+
+### Added
+- **`concierge-enhancer`, a Claude Code mod that sharpens a prompt and shows its skill menu before you send it.**
+  A second plugin in this repo's marketplace (`adapters/claude-code/mod/`), standalone and optional. It draws a band
+  above the prompt with one button, Enhance. Enhance rewrites the draft in place (no skill names, no questions back
+  to the author, the author's own terms kept verbatim) and previews the skills concierge ranks for the raw draft
+  plus the rewrite's one-line intent. You send with Enter as usual. Install: `/plugin install concierge-enhancer --marketplace thinhkhuat/skill-concierge`.
+  Why this shape: a blind A/B on 20 real prompts (`plans/261012-0935-prompt-enhancer-ab/report.md`) found the raw
+  draft plus a verbatim-terms intent line beats the raw prompt (13–7 head to head), while ranking the full rewrite
+  gives the worst menus, and an "ask the author" section put `first-ask` into 12 of 20 menus.
+- **The enforcer ranks the enhancer's route hint when the rewrite is sent unedited.** The mod writes a one-shot
+  `~/.claude/skill-concierge/route-hints/<session_id>.json`; `hooks/scripts/enforcer.py` `_route_hint` reads it first
+  thing, removes it either way, and uses it only for the exact prompt it names (surrounding whitespace aside) within
+  300 seconds. The model's menu is then ranked on the text the band previewed; the ranking itself can still vary
+  run to run. The offer row keeps `q` as the prompt as sent, so it still pairs with its turn row, and adds
+  `"rq"` (the route text) and `"via": "enhancer"`. With no mod installed, no hint exists and the enforcer behaves
+  exactly as before.
+
+### Epoch
+- This release changes `hooks/scripts/enforcer.py`, so it starts a new retrieval epoch. Rows with `"via": "enhancer"`
+  were ranked on the enhancer's route text (`rq`), not the prompt as sent: window them apart when measuring.
+
 ## [0.66.4] - 2026-10-11
 
 ### Fixed

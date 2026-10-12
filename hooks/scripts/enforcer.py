@@ -1229,6 +1229,40 @@ def _route_matches(sub: str, low: str) -> bool:
     return re.search(pat, low, re.ASCII) is not None
 
 
+ROUTE_HINTS = Path.home() / ".claude" / "skill-concierge" / "route-hints"
+ROUTE_HINT_TTL = 300    # seconds; the mod writes the hint inside the same submit, so this only guards clocks
+_SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_VIA: dict = {}    # offer-row keys for a hinted run: via, q (the prompt as sent) and rq (the route text)
+
+
+def _route_hint(sid: str, prompt: str):
+    """The routing text the concierge-enhancer mod left for this exact prompt, or None.
+
+    The mod (adapters/claude-code/mod) writes `route-hints/<session_id>.json` as
+    `{"prompt", "route", "t"}` while the prompt is being submitted, before this hook runs.
+    One-shot: the file is removed whether or not it matches, so a hint never routes a later
+    prompt. Fail-silent: a missing, unreadable or mismatched hint means no hint."""
+    if not _SID_RE.match(sid or ""):
+        return None
+    path = ROUTE_HINTS / (sid + ".json")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return None
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if not isinstance(data, dict):
+        return None
+    sent, route, t = data.get("prompt"), data.get("route"), data.get("t")
+    if (not isinstance(sent, str) or sent.strip() != prompt or not isinstance(route, str)
+            or not route.strip() or not isinstance(t, (int, float)) or not math.isfinite(t)
+            or abs(time.time() - t) > ROUTE_HINT_TTL):
+        return None
+    return route.strip()
+
+
 def _route_hits(prompt: str, keepoff: frozenset = frozenset()) -> list:
     """Every configured route whose text is in the lowercased prompt as a whole word, as
     [(name, desc, 1.0)] in first-match order, de-duped. Pure (no I/O) so it runs before the
@@ -1336,6 +1370,7 @@ def _offer_ev(sid: str, band: str, offered: list, fallback, q: str, dropped=None
     ev = {"t": round(time.time(), 3), "sid": sid, "ev": "offer",
           "band": band, "offered": offered, "fallback": fallback, "q": q[:120],
           "harness": RUNNING_HARNESS}
+    ev.update(_VIA)    # a hinted run: "via": "enhancer", q as sent, rq the route text actually ranked
     if dropped:
         ev["dropped"] = dropped
     if ext:
@@ -3022,6 +3057,8 @@ def main() -> int:
             return 0
         prompt = (data.get("prompt") or "").strip()
         sid = data.get("session_id", "")
+        # Consumed first, so a hint never outlives the prompt it was left for, even one an early lane ends.
+        _hinted = _route_hint(sid, prompt)
 
         # Cheap pre-gate (no I/O): empty, explicit slash-command (user already
         # chose a route), or an ultra-short acknowledgement. These never embed.
@@ -3065,6 +3102,14 @@ def main() -> int:
             _append_offer(sid, "selfref_skip", [], "self_referential", prompt)
             _authorized_skip_inject("selfref", sid)
             return 0
+
+        # The concierge-enhancer mod's route hint (read at the top of main): rank the user's raw
+        # draft plus the rewrite's intent line, which beat the full rewrite in a blind A/B
+        # (plans/261012-0935-prompt-enhancer-ab/report.md). Applied after the no-I/O lanes, so those
+        # still judge the prompt as sent. The row keeps `q` as sent, so offers still pair with turns.
+        if _hinted:
+            _VIA.update(via="enhancer", q=prompt[:120], rq=_hinted[:120])
+            prompt = _hinted
 
         # ADR-0054: deterministic routes run BEFORE the embed step (pure, no I/O) so a skill
         # the user NAMED still leads the menu when the shim or Qdrant times out — 4 of the 11

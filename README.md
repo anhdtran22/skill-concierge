@@ -1,6 +1,6 @@
 # skill-concierge
 
-[![version](https://img.shields.io/badge/version-0.66.4-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.67.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://docs.claude.com/en/docs/claude-code)
 [![built on](https://img.shields.io/badge/built%20on-skill--search-orange.svg)](https://github.com/sowhan/skill-search)
@@ -133,6 +133,30 @@ ranked RUN/⚠/ALSO verdict with promote-ready external picks. The per-turn offe
 untouched; consult is the opt-in planning step. Since 0.43.0 the enforcer also ROUTES
 deliberation-shaped turns there ("which skills should I use for X") via a
 `CONSULT-ROUTE` mandate (ADR-0049 phase 2, `SKILL_CONSULT_ROUTE=0` to disable).
+
+### Enhance a prompt before you send it (Claude Code)
+
+`concierge-enhancer` is an optional Claude Code mod in this repo ([`adapters/claude-code/mod/`](adapters/claude-code/mod/)). It adds a band above the prompt:
+
+```
+Concierge [ Enhance ]  ctrl+x tab · e enhance · esc back
+Skill preview: chisle · chisle:chisle · ak-devops · ak-backend-development · ak-databases
+```
+
+1. Type a rough draft.
+2. Focus the band (`ctrl+x tab`, or your own `abovePrompt:focus` chord) and press `e`.
+3. The draft is replaced by a sharper prompt, and the band previews the skills concierge ranks for it.
+4. Send it with Enter, as usual. Edit it first if you like.
+
+The rewrite names no skills and asks no questions back: it states the work, its domain and what done looks like, and keeps your own terms as you wrote them. Concierge ranks your raw draft plus a one-line intent from the rewrite, not the full rewrite, because a blind A/B on 20 real prompts found the full rewrite gives the worst menus ([report](plans/261012-0935-prompt-enhancer-ab/report.md)). When you send the rewrite unedited, the mod leaves a one-shot route hint, so the model's menu is ranked on the same text the band previewed; an edited prompt is ranked as sent. The preview is a preview: the ranking can differ from run to run. The ledger row keeps the prompt as sent in `q`, adds the route text as `rq` and marks `"via": "enhancer"`.
+
+Install it at the prompt of a Claude Code terminal session; it needs the `skill-concierge` plugin installed:
+
+```
+/plugin install concierge-enhancer --marketplace thinhkhuat/skill-concierge
+```
+
+Remove it with `/plugin uninstall concierge-enhancer`. Without the mod, no route hint is ever written and the enforcer behaves exactly as before.
 
 ### MCP tools
 
@@ -393,7 +417,7 @@ gate in detail: [`enforcement-gate.md`](openwiki/architecture/enforcement-gate.m
 
 ## Status & roadmap
 
-Current release: `0.66.4` — **published**. Per-version history, including every release since
+Current release: `0.67.0` — **published**. Per-version history, including every release since
 `0.1.0`, lives in [`CHANGELOG.md`](CHANGELOG.md); the decisions behind them are in
 [`docs/adr/`](docs/adr/README.md). Per-epoch watch items (what to monitor after a release,
 triggers, env-first actions): [`docs/epoch-watch.md`](docs/epoch-watch.md) — the single canonical
