@@ -3,6 +3,18 @@
 All notable changes to **skill-concierge**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and evolving.
 
+## [0.68.3] - 2026-10-12
+
+### Changed
+- **Inserting a skill from the menu keeps the saved ranking.** The hook served a draft-time ranking only for exactly
+  the text that was ranked, so a skill name added with the band's insert keys made it rank again at Enter: one more Jev
+  call, the usual wait, and a `✓` menu that could differ from the one you picked from. A `ranked` ticket now also
+  answers a sent text that is its draft plus skill names from that ticket's own menu (main rows and pull-ins): the
+  words left after dropping those names, whitespace collapsed, must hash to the draft exactly (new ticket field `qn`).
+  Any other edit, or a name from outside the menu, still ranks live.
+
+`hooks/scripts/offer_ticket.py` changed, so a new ledger epoch starts here (`docs/epoch-watch.md`).
+
 ## [0.68.2] - 2026-10-12
 
 ### Added

@@ -324,6 +324,45 @@ def test_an_edited_prompt_finds_no_ticket(tmp_path, monkeypatch):
     assert calls[1]["prompt"] == SENT + " and keep the old toggle"
 
 
+def test_a_skill_name_inserted_from_the_menu_keeps_the_saved_ranking(tmp_path, monkeypatch):
+    calls = []
+    _, _, spec_context = speculate(boot(tmp_path, monkeypatch, calls), monkeypatch)
+    sent = SENT + " ak-git"                        # the band's insert key: a name from this menu
+    context = hook(boot(tmp_path, monkeypatch, calls), monkeypatch, tmp_path, prompt=sent)
+    assert len(calls) == 1                          # no second Jev ranking at Enter
+    assert context == spec_context
+    [row] = rows(tmp_path, "offer")
+    assert (row["via"], row["q"], row["jev"]["src"], row["spec"]["st"]) == ("enhancer", sent, "ticket", "ready")
+
+
+def test_two_inserted_names_mid_draft_still_keep_the_saved_ranking(tmp_path, monkeypatch):
+    calls = []
+    speculate(boot(tmp_path, monkeypatch, calls), monkeypatch)
+    words = SENT.split()
+    sent = " ".join(words[:3] + ["update-config"] + words[3:] + ["ak-git"])
+    hook(boot(tmp_path, monkeypatch, calls), monkeypatch, tmp_path, prompt=sent)
+    assert len(calls) == 1
+
+
+def test_a_name_from_outside_the_menu_or_any_other_edit_ranks_live(tmp_path, monkeypatch):
+    calls = []
+    speculate(boot(tmp_path, monkeypatch, calls), monkeypatch)
+    hook(boot(tmp_path, monkeypatch, calls), monkeypatch, tmp_path, prompt=SENT + " frontend-design")   # not in the menu, and no deterministic route
+    assert len(calls) == 2
+    speculate(boot(tmp_path, monkeypatch, calls), monkeypatch)
+    hook(boot(tmp_path, monkeypatch, calls), monkeypatch, tmp_path, prompt=SENT + " ak-git please")   # an extra word
+    assert len(calls) == 4
+
+
+def test_an_insert_never_matches_a_ticket_still_ranking(tmp_path, monkeypatch):
+    calls = []
+    speculate(boot(tmp_path, monkeypatch, calls), monkeypatch)
+    edit_ticket(state="ranking", verdict=None)
+    from importlib import import_module
+    ot = import_module("offer_ticket")
+    assert ot.find(SID, SENT + " ak-git") is None
+
+
 def test_surrounding_whitespace_on_the_sent_text_still_matches(tmp_path, monkeypatch):
     calls = []
     speculate(boot(tmp_path, monkeypatch, calls), monkeypatch)

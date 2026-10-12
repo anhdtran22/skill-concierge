@@ -13,6 +13,12 @@ say "insufficient data" when the window is too small. Never pool across epochs
 
 ---
 
+## v0.68.3 — inserts keep the ticket
+
+**Epoch starts** at the 0.68.3 commit (`hooks/scripts/offer_ticket.py` changed). A ranked ticket now also serves a sent text that is its draft plus skill names from its own menu, so the share of `jev.src: "ticket"` among `via: "enhancer"` turns rises when the band's insert keys are used. Compare W49 and W51 only within this epoch.
+
+---
+
 ## v0.68.0 — the draft-time ticket (concierge-enhancer 0.2.0, `ENFORCER_TICKET`)
 
 **Epoch starts** at the 0.68.0 commit (take the exact time from `git log` on `hooks/scripts/enforcer.py` and `hooks/scripts/offer_ticket.py`). A turn can now carry a Jev verdict ranked while the person typed, so what the ledger measures changes in four ways.

@@ -73,6 +73,7 @@ class Ticket(NamedTuple):
     n: int                    # runs the mod made for this composed prompt (cost telemetry)
     verdict: Optional[Verdict]
     qh: str = ""              # SHA-256 of the stripped sent text; `redeem` re-reads the file by it
+    qn: str = ""              # SHA-256 of the same text with its whitespace collapsed (insert matching)
 
 
 class Redemption(NamedTuple):
@@ -85,6 +86,10 @@ class Redemption(NamedTuple):
 
 def _hash(sent: str) -> str:
     return hashlib.sha256((sent or "").strip().encode("utf-8", "replace")).hexdigest()
+
+
+def _norm_hash(text: str) -> str:
+    return hashlib.sha256(" ".join((text or "").split()).encode("utf-8", "replace")).hexdigest()
 
 
 def _path(sid: str) -> Path:
@@ -196,7 +201,7 @@ def open_ticket(sid: str, sent: str, intent: str, *, ranking: bool, ctx: str, en
         if not isinstance(sid, str) or not SID_RE.match(sid):
             return
         path = _path(sid)
-        if _write(path, {"v": TICKET_VERSION, "sid": sid, "qh": _hash(sent),
+        if _write(path, {"v": TICKET_VERSION, "sid": sid, "qh": _hash(sent), "qn": _norm_hash(sent),
                          "intent": (intent or "")[:MAX_INTENT_CHARS],
                          "state": "ranking" if ranking else "unranked", "made": time.time(),
                          "deadline": float(deadline), "pid": os.getpid(), "ctx": ctx, "env": env,
@@ -221,7 +226,7 @@ def settle(sid: str, sent: str, verdict: Optional[Verdict]) -> None:
         t = _load(sid, _hash(sent), check_age=False)
         if t is None or t.pid != os.getpid() or t.state != "ranking":
             return
-        doc = {"v": TICKET_VERSION, "sid": sid, "qh": t.qh, "intent": t.intent, "state": "unranked",
+        doc = {"v": TICKET_VERSION, "sid": sid, "qh": t.qh, "qn": t.qn, "intent": t.intent, "state": "unranked",
                "made": t.made, "deadline": t.deadline, "pid": t.pid, "ctx": t.ctx, "env": t.env,
                "n": t.n, "verdict": None}
         if verdict is not None and verdict.result is not None:
@@ -290,15 +295,35 @@ def _load(sid: str, qh: str, check_age: bool = True) -> Optional[Ticket]:
         verdict = _parse_verdict(d.get("verdict"))
         if verdict is None:
             return None
-    return Ticket(sid, intent, d["state"], float(made), float(deadline), pid, ctx, env, n, verdict, qh)
+    qn = d.get("qn") if isinstance(d.get("qn"), str) else ""
+    return Ticket(sid, intent, d["state"], float(made), float(deadline), pid, ctx, env, n, verdict, qh, qn)
 
 
 def find(sid: str, sent: str) -> Optional[Ticket]:
     """The hook's first read, before the early lanes: the ticket for exactly this sent text
     (SHA-256 of the stripped prompt), this sid, version TICKET_VERSION, younger than TICKET_TTL_S,
     with finite numbers and an intent no longer than MAX_INTENT_CHARS. None for anything else,
-    including a malformed, deeply nested or oversized file. Read-only."""
-    return _load(sid, _hash(sent))
+    including a malformed, deeply nested or oversized file. Read-only.
+
+    One widening: a ranked ticket also answers a sent text that is the ranked draft plus skill names
+    taken from that ticket's own menu (rows and pull-ins), as the mod's insert keys add them. The
+    words left after dropping those names, whitespace collapsed, must hash to the draft exactly, so
+    any other edit still finds no ticket."""
+    exact = _load(sid, _hash(sent))
+    if exact is not None:
+        return exact
+    try:
+        qh = json.loads(_path(sid).read_text(encoding="utf-8")).get("qh") if SID_RE.match(sid or "") else None
+    except (OSError, ValueError, UnicodeError, RecursionError, TypeError, AttributeError):
+        return None
+    t = _load(sid, qh) if isinstance(qh, str) else None
+    if t is None or t.state != "ranked" or t.verdict is None or not t.qn:
+        return None
+    _, main, _, pulled = t.verdict.result
+    names = {r[0] for r in main} | {r[0] for r in pulled}
+    words = (sent or "").split()
+    kept = [w for w in words if w not in names]
+    return t if len(kept) < len(words) and _norm_hash(" ".join(kept)) == t.qn else None
 
 
 def _alive(pid: int) -> bool:
