@@ -88,6 +88,7 @@ CLAUDE_PLUGINS_FILE = CLAUDE_PLUGINS_DIR / "installed_plugins.json"
 # (the mod and settings reference the dev path directly). WARN-only.
 CCMD_DIR = Path.home() / ".commandcode"
 CCMD_MOD = CCMD_DIR / "mods" / "skill-concierge.ts"
+CCMD_ROOT_POINTER = CCMD_DIR / "skill-concierge-root"
 CCMD_SETTINGS = CCMD_DIR / "settings.json"
 CCMD_MCP = CCMD_DIR / "mcp.json"
 _CCMD_SETTINGS_HOOK_MARKER = "skill-concierge"  # SessionStart commands contain this string
@@ -1758,16 +1759,36 @@ def check_codex():
                       "descriptor and hooks present",
             "fix": None, "version": cached_ver, "plugin_installed": plugin_installed}
 
+def _commandcode_mod_resolves():
+    """True when the INSTALLED mod can name a plugin root, resolved the way the mod resolves it:
+    `SKILL_CONCIERGE_ROOT`, then the sibling `../..`, then `~/.commandcode/skill-concierge-root`.
+    The mod is a COPY, so its sibling candidate is $HOME — a copy that only the pointer rescues.
+    Issue #1: without this check the row read OK while every enforcer spawn failed open."""
+    def resolves(d):
+        return bool(d) and (Path(d) / "hooks" / "scripts" / "enforcer.py").is_file()
+    if resolves(os.environ.get("SKILL_CONCIERGE_ROOT", "")):
+        return True
+    if resolves(CCMD_MOD.parent.parent):
+        return True
+    try:
+        recorded = CCMD_ROOT_POINTER.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return resolves(recorded)
+
+
 def check_commandcode():
     """Command Code harness install state — mod + settings + MCP surface (ADR-0038).
 
     Command Code integrates skill-concierge through a TypeScript mod, SessionStart hooks,
     and an MCP server entry — all installed by adapters/commandcode/install.sh into
-    ~/.commandcode/. There is no version manifest or plugin cache; the installed mod
-    references the dev path (or $SKILL_CONCIERGE_ROOT) directly. Three presence signals:
+    ~/.commandcode/. There is no version manifest or plugin cache; the installed mod is a COPY
+    of the checkout, and names that checkout through ~/.commandcode/skill-concierge-root (or
+    $SKILL_CONCIERGE_ROOT). Four signals:
       1. mod file at ~/.commandcode/mods/skill-concierge.ts
       2. SessionStart hooks in ~/.commandcode/settings.json referencing skill-concierge
       3. MCP skill-search entry in ~/.commandcode/mcp.json
+      4. the installed mod can resolve a plugin root carrying hooks/scripts/enforcer.py
     WARN-only — absent Command Code is one row, never a failure.
     """
     if not CCMD_DIR.exists():
@@ -1788,6 +1809,15 @@ def check_commandcode():
                                 "(a stale copy) — re-run adapters/commandcode/install.sh")
         except OSError:
             pass
+        # A byte-identical copy can still be dead: the mod is COPIED out of the repo, so its
+        # `../..` candidate is $HOME. Without a resolvable root every enforcer spawn fails open
+        # and the per-turn enforcer is silently gone (issue #1) — the mod-side mirror of the
+        # stale-copy case above.
+        if not _commandcode_mod_resolves():
+            findings.append("the installed mod cannot resolve a plugin root (no usable "
+                            "~/.commandcode/skill-concierge-root pointer, no SKILL_CONCIERGE_ROOT, "
+                            "no sibling checkout) — the per-turn enforcer fails open; re-run "
+                            "adapters/commandcode/install.sh")
     # 2. SessionStart hooks referencing skill-concierge: our marker string inside a hook command
     settings = None
     hook_found = False

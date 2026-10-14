@@ -106,6 +106,10 @@ project_mcp_path = Path(sys.argv[4])
 mod_src = Path(sys.argv[5])
 mod_dst = Path(sys.argv[6])
 has_project = project_mcp_path.parent.is_dir()
+# The mod is COPIED to ~/.commandcode/mods/, so `../..` from an installed copy resolves to
+# $HOME and can never name this checkout. This pointer file is the candidate that survives the
+# copy, so an installed mod on someone else's machine can still find its root (issue #1).
+ROOT_POINTER = Path.home() / ".commandcode" / "skill-concierge-root"
 
 SERVER_ENV = {
     "SKILL_QDRANT_URL": "http://localhost:6333",
@@ -237,12 +241,15 @@ mod_dst.parent.mkdir(parents=True, exist_ok=True)
 mod_dst.write_bytes(mod_bytes)
 os.chmod(mod_dst, 0o755)
 print(f"  [✓] Installed mod: {mod_dst}")
+safe_write.write_text(ROOT_POINTER, root + "\n")
+print(f"  [✓] Recorded the root the installed mod resolves: {ROOT_POINTER}")
 PY
 
 # ── 5. Verify (ZCode parity: adapters/zcode/install.sh §6) ──────────────────
 echo "==> verify:"
 python3 - "$ROOT" "$MOD_DST" "$SETTINGS_FILE" "$MCP_FILE" <<'PYEOF'
 import json
+import os
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
@@ -302,6 +309,37 @@ try:
         bad = True
 except Exception as e:
     print(f"    !! mcp.json read failed: {e}", flush=True)
+    bad = True
+
+
+# 5d. The installed mod must be able to resolve a plugin root. It is COPIED to
+#     ~/.commandcode/mods/, where its sibling `../..` candidate is $HOME — so without the pointer
+#     above, every enforcer/ledger spawn fails open and the per-turn enforcer is silently dead
+#     while every check before this one still passes (issue #1).
+def _resolves(d):
+    return bool(d) and (Path(d) / "hooks/scripts/enforcer.py").is_file()
+
+
+try:
+    pointer_path = Path.home() / ".commandcode" / "skill-concierge-root"
+    resolved = ""
+    if _resolves(os.environ.get("SKILL_CONCIERGE_ROOT", "")):
+        resolved = os.environ["SKILL_CONCIERGE_ROOT"]
+    elif _resolves(mod_dst.parent.parent):
+        resolved = str(mod_dst.parent.parent)
+    elif pointer_path.is_file():
+        recorded = pointer_path.read_text(encoding="utf-8").strip()
+        if _resolves(recorded):
+            resolved = recorded
+    if resolved:
+        print(f"    mod resolves a plugin root: yes ({resolved})")
+    else:
+        print(f"    !! the installed mod cannot resolve a plugin root: no usable pointer at "
+              f"{pointer_path}, no SKILL_CONCIERGE_ROOT and no sibling checkout — the per-turn "
+              f"enforcer would fail open", flush=True)
+        bad = True
+except Exception as e:
+    print(f"    !! root resolution check failed: {e}", flush=True)
     bad = True
 if bad:
     print("    verify: FAILED — see lines above", flush=True)

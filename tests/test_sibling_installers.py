@@ -499,6 +499,9 @@ def test_apostrophe_and_double_quote_in_root_path(tmp_path):
     launcher = root / "bin" / "skill-search-mcp"
     launcher.touch()
     launcher.chmod(0o755)
+    # ADR-0091: a root candidate must carry the enforcer, and a real checkout does.
+    (root / "hooks" / "scripts").mkdir(parents=True)
+    (root / "hooks" / "scripts" / "enforcer.py").write_text("# enforcer fixture\n")
     home = tmp_path / "home's dir"
     home.mkdir()
 
@@ -510,6 +513,8 @@ def test_apostrophe_and_double_quote_in_root_path(tmp_path):
     # An unquoted heredoc lets bash run the backticks inside the embedded Python's comments.
     assert "command not found" not in r.stderr, r.stderr
     assert "verify: OK" in r.stdout, r.stdout + r.stderr
+    # ADR-0091: verify now proves the installed copy can resolve a root, not just that it matches.
+    assert "mod resolves a plugin root: yes" in r.stdout, r.stdout + r.stderr
 
     mcp = json.loads((home / ".commandcode" / "mcp.json").read_text())
     assert mcp["mcpServers"]["skill-search"]["command"] == f"{root}/bin/skill-search-mcp"
@@ -538,6 +543,33 @@ def test_commandcode_verify_failure_exits_nonzero(tmp_path):
     assert r.returncode == 1, r.stdout + r.stderr
     assert "verify: FAILED" in r.stdout, r.stdout + r.stderr
     assert "MCP launcher not found" in r.stdout, r.stdout + r.stderr
+
+
+def test_commandcode_verify_fails_when_no_root_resolves(tmp_path):
+    """ADR-0091 / issue #1: the installer COPIES the mod to ~/.commandcode/mods/, so the copy's
+    sibling `../..` candidate is $HOME. A checkout with no hooks/scripts/enforcer.py leaves every
+    candidate unresolved — the shape that used to print `verify: OK` while every enforcer spawn
+    failed open. Verify must fail instead."""
+    root = tmp_path / "repo"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": "9.9.9"}))
+    (root / "adapters" / "commandcode").mkdir(parents=True)
+    shutil.copy(ROOT / "adapters" / "commandcode" / "skill-concierge.mod.ts",
+                root / "adapters" / "commandcode" / "skill-concierge.mod.ts")
+    (root / "bin").mkdir()
+    launcher = root / "bin" / "skill-search-mcp"
+    launcher.touch()
+    launcher.chmod(0o755)
+    # Deliberately no hooks/scripts/enforcer.py: the root the pointer records cannot be resolved.
+    home = tmp_path / "home"
+    home.mkdir()
+
+    env = installer_env(tmp_path, home)
+    r = subprocess.run(["bash", str(INSTALL_SH["commandcode"]), "--root", str(root)],
+                        env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "cannot resolve a plugin root" in r.stdout, r.stdout + r.stderr
+    assert "verify: FAILED" in r.stdout, r.stdout + r.stderr
 
 
 def test_commandcode_refuses_a_malformed_settings_json_instead_of_resetting_it(tmp_path):
@@ -704,6 +736,9 @@ def test_commandcode_write_keeps_a_symlinked_settings_json_a_symlink_and_a_0600_
     launcher = root / "bin" / "skill-search-mcp"
     launcher.touch()
     launcher.chmod(0o755)
+    # ADR-0091: a root candidate must carry the enforcer, and a real checkout does.
+    (root / "hooks" / "scripts").mkdir(parents=True)
+    (root / "hooks" / "scripts" / "enforcer.py").write_text("# enforcer fixture\n")
     home = tmp_path / "home"
     cmd = home / ".commandcode"
     cmd.mkdir(parents=True)

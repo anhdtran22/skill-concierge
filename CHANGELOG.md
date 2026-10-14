@@ -3,6 +3,37 @@
 All notable changes to **skill-concierge**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and evolving.
 
+## [0.68.4] - 2026-10-14
+
+### Fixed
+- **The Command Code mod can resolve its plugin root on a machine that is not the maintainer's.** `install.sh` copies
+  the mod to `~/.commandcode/mods/`, so the mod's sibling `../..` candidate is `$HOME` — and the resolution order
+  ended with a hardcoded `~/in-PROD/MY-WORKBENCH/skill-concierge` that exists on exactly one machine. Everywhere
+  else `PLUGIN_ROOT` degraded to `$HOME`, every `enforcer.py` / `ledger.py` / `skill_exclusions.py` spawn missed, and
+  the mod's fail-open handlers turned that into silence: the SessionStart settings hooks still ran (they carry
+  absolute paths the installer wrote), `install.sh` printed `verify: OK` (step 5a compares the copy for byte-identity,
+  which says nothing about whether the copy can resolve a root) and doctor's `Command Code integration` row read
+  `[✓]` — while the per-turn enforcer was dead, writing no `offer` row and prompting no `search` row. Found by
+  `scripts/smoke.py commandcode` (FAIL without `SKILL_CONCIERGE_ROOT`, PASS with it, same commit) and reported as
+  issue #1.
+
+  `install.sh` now records the checkout path in `~/.commandcode/skill-concierge-root`, and the mod resolves
+  `SKILL_CONCIERGE_ROOT` → the sibling `../..` → that pointer. **Every candidate must carry
+  `hooks/scripts/enforcer.py`**, so a home directory, a stale checkout or a dangling pointer falls through instead of
+  arming the mod with scripts that are not there — which also means a set-but-useless `SKILL_CONCIERGE_ROOT` no longer
+  blocks a pointer that works. `install.sh` step 5 resolves the root the way the mod does and fails the run when none
+  is reachable, and doctor gained the same check, so the silent case is now one command away instead of only visible
+  under a live smoke turn.
+
+  The copy stays byte-identical to the checkout's file, so step 5a keeps its meaning. ADR-0091 records the decision
+  and the four rejected alternatives (bake the root into the copied file; symlink the mod — Command Code resolves the
+  registered path, not the realpath; derive the root from `mcp.json`; a settings-level `env` block, which Command Code
+  does not propagate to mods).
+
+`adapters/commandcode/skill-concierge.mod.ts` and `adapters/commandcode/install.sh` changed. On an install that was
+failing open, Command Code turns start writing `offer` rows where they previously wrote none — treat that boundary as
+a break when comparing Command Code ledger windows.
+
 ## [0.68.3] - 2026-10-12
 
 ### Changed

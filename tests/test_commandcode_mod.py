@@ -228,3 +228,88 @@ def test_caches_are_bounded(fake):
     drive([context([first])] + others + [context([first])])
     prompts = [r["prompt"] for r in logged("enforcer.py", 67)]
     assert prompts.count("the first prompt") == 2, "the oldest cached prompt must be evicted after 64 newer ones"
+
+
+@pytest.fixture()
+def installed(tmp_path):
+    """The INSTALLED layout, not the dev one. `install.sh` COPIES the mod to
+    `<home>/.commandcode/mods/`, so `../..` from the copy is `<home>` — a directory with no
+    enforcer in it. Only the root pointer file can name a checkout, which is exactly the case
+    issue #1 is about (before 0.68.4 the last fallback was the maintainer's own hardcoded path).
+    Returns (drive, logged, pointer, root, home)."""
+    home, root, log = tmp_path / "home", tmp_path / "checkout", tmp_path / "log"
+    (home / ".commandcode" / "mods").mkdir(parents=True)
+    (root / "hooks" / "scripts").mkdir(parents=True)
+    log.mkdir()
+    mod = home / ".commandcode" / "mods" / MOD.name
+    shutil.copy(MOD, mod)
+    for name in SCRIPTS:
+        (root / "hooks" / "scripts" / name).write_text(STUB)
+    pointer = home / ".commandcode" / "skill-concierge-root"
+
+    def drive(calls, env_root=None):
+        e = {**os.environ, "STUB_LOG": str(log), "HOME": str(home)}
+        e.pop("COMMANDCODE_SESSION_ID", None)
+        e.pop("SKILL_CONCIERGE_ROOT", None)
+        if env_root is not None:
+            e["SKILL_CONCIERGE_ROOT"] = str(env_root)
+        r = subprocess.run([NODE, str(HARNESS), str(mod)],
+                           input=json.dumps({"calls": calls}),
+                           capture_output=True, text=True, timeout=120, env=e)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout)
+
+    def logged(name, expect=0):
+        path = log / f"{name}.jsonl"
+        read = lambda: [json.loads(json.loads(x)["stdin"]) for x in path.read_text().splitlines()] \
+            if path.exists() else []
+        deadline = time.time() + 5
+        while len(read()) < expect and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.4)
+        return read()
+
+    return drive, logged, pointer, root, home
+
+
+def test_installed_copy_resolves_its_root_from_the_pointer(installed):
+    """The bug in issue #1: the copy cannot use `../..`, so the pointer is what arms it."""
+    drive, logged, pointer, root, _ = installed
+    pointer.write_text(str(root) + "\n")
+    res = drive([context([user("fix the login bug")])])[0]
+    assert len(menus(res)) == 1, "the installed copy must resolve the pointer root"
+    assert [r["prompt"] for r in logged("enforcer.py", 1)] == ["fix the login bug"]
+
+
+def test_the_personal_checkout_path_no_longer_arms_an_install(installed):
+    """Regression pin: the pre-0.68.4 last fallback was a hardcoded
+    `~/in-PROD/MY-WORKBENCH/skill-concierge`, which exists only on the maintainer's machine.
+    Its presence must not be what an installed copy resolves to."""
+    drive, logged, pointer, root, home = installed
+    personal = home / "in-PROD" / "MY-WORKBENCH" / "skill-concierge"
+    (personal / "hooks" / "scripts").mkdir(parents=True)
+    for name in SCRIPTS:
+        (personal / "hooks" / "scripts" / name).write_text(STUB)
+    res = drive([context([user("fix the login bug")])])[0]
+    assert menus(res) == [], "a personal path must never stand in for a resolved root"
+    assert logged("enforcer.py") == []
+
+
+def test_a_dangling_pointer_falls_through_instead_of_crashing(installed):
+    drive, logged, pointer, root, home = installed
+    pointer.write_text(str(home / "gone") + "\n")
+    msgs = [user("fix the login bug")]
+    res = drive([context(msgs)])[0]      # drive asserts a clean exit
+    assert res == msgs, "no root: the prompt passes through untouched"
+    assert logged("enforcer.py") == []
+
+
+def test_an_env_root_without_the_enforcer_falls_through_to_the_pointer(installed):
+    """Every candidate must carry `hooks/scripts/enforcer.py`; a set-but-useless
+    `SKILL_CONCIERGE_ROOT` must not stop the pointer from being tried."""
+    drive, logged, pointer, root, home = installed
+    pointer.write_text(str(root) + "\n")
+    bogus = home / "not-a-checkout"
+    bogus.mkdir()
+    res = drive([context([user("fix the login bug")])], env_root=bogus)[0]
+    assert len(menus(res)) == 1, "a bogus env root must fall through to the pointer"

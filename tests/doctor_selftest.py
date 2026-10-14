@@ -435,15 +435,17 @@ def _selftest():
     finally:
         _g.update(_saved_zc)
 
-    # --- Command Code harness check (ADR-0038): fixture-driven, never touches the real ~/.commandcode ---
-    # Two outcomes: absent CC -> WARN "not installed"; all surface present -> OK.
-    _saved_ccmd = {k: _g[k] for k in ("CCMD_DIR", "CCMD_MOD", "CCMD_SETTINGS", "CCMD_MCP",
-                                      "_CCMD_SETTINGS_HOOK_MARKER", "CCMD_SKILLS_ROOTS")}
+    # --- Command Code harness check (ADR-0038, ADR-0091): fixture-driven, never touches the real
+    # ~/.commandcode. Outcomes: absent CC -> WARN "not installed"; all surface present with a
+    # resolvable root -> OK; a stale copy, or no resolvable root, -> WARN naming the cause.
+    _saved_ccmd = {k: _g[k] for k in ("CCMD_DIR", "CCMD_MOD", "CCMD_ROOT_POINTER", "CCMD_SETTINGS",
+                                      "CCMD_MCP", "_CCMD_SETTINGS_HOOK_MARKER", "CCMD_SKILLS_ROOTS")}
     try:
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             _g["CCMD_DIR"] = base / ".commandcode"
             _g["CCMD_MOD"] = _g["CCMD_DIR"] / "mods" / "skill-concierge.ts"
+            _g["CCMD_ROOT_POINTER"] = _g["CCMD_DIR"] / "skill-concierge-root"
             _g["CCMD_SETTINGS"] = _g["CCMD_DIR"] / "settings.json"
             _g["CCMD_MCP"] = _g["CCMD_DIR"] / "mcp.json"
             # Command Code absent entirely -> WARN "commandcode: not installed", never FAIL.
@@ -464,12 +466,25 @@ def _selftest():
             _g["CCMD_MCP"].write_text(json.dumps({
                 "mcpServers": {"skill-search": {"command": "/path/to/bin/skill-search-mcp"}}
             }))
+            # ADR-0091: the installed mod is a COPY, so it needs a root it can actually resolve —
+            # the installer's pointer file, aimed at a checkout carrying the enforcer.
+            _checkout = base / "checkout"
+            (_checkout / "hooks" / "scripts").mkdir(parents=True)
+            (_checkout / "hooks" / "scripts" / "enforcer.py").write_text("# enforcer fixture\n")
+            _g["CCMD_ROOT_POINTER"].write_text(str(_checkout) + "\n")
             row = check_commandcode()
             assert row["status"] == OK, row
             # Negative control: a stale copy of the mod (the installer COPIES it) -> WARN naming it.
             _g["CCMD_MOD"].write_text("export default function(cmd) { /* an older mod */ }")
             row = check_commandcode()
             assert row["status"] == WARN and "stale copy" in row["detail"], row
+            # Negative control: byte-identical again but no root resolves (issue #1) — the case
+            # that used to read [✓] while every enforcer spawn failed open.
+            _g["CCMD_MOD"].write_bytes(_mod_src.read_bytes())
+            _g["CCMD_ROOT_POINTER"].unlink()
+            row = check_commandcode()
+            assert row["status"] == WARN and "cannot resolve a plugin root" in row["detail"], row
+            _g["CCMD_ROOT_POINTER"].write_text(str(_checkout) + "\n")   # restore for the controls below
             _g["CCMD_MOD"].write_bytes(_mod_src.read_bytes())
             # Negative control: an event outside CC's four (PreCompact is what the palate
             # writer copies in from Claude) -> WARN naming it.

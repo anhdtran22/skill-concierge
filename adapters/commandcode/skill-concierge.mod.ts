@@ -30,27 +30,45 @@
  */
 
 import { spawnSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 
+// install.sh COPIES this mod to ~/.commandcode/mods/ (a plugin cache copy is refused, but the
+// mods dir is not the repo either), so `../..` from an installed copy is the user's home. The
+// installer therefore records the checkout path in this pointer file — the one candidate that
+// survives the copy and names a root on a machine that is not the maintainer's.
+const ROOT_POINTER = join(homedir(), ".commandcode", "skill-concierge-root");
+
+/** A real skill-concierge root: it carries the enforcer this mod spawns. */
+function isPluginRoot(dir: string): boolean {
+  return !!dir && existsSync(join(dir, "hooks/scripts/enforcer.py"));
+}
+
+/** The checkout path install.sh recorded, or "" when absent, blank or pointing nowhere. */
+function pointerRoot(): string {
+  try {
+    const recorded = readFileSync(ROOT_POINTER, "utf-8").trim();
+    return isPluginRoot(recorded) ? recorded : "";
+  } catch {
+    return ""; // no pointer (a dev copy, or an install from before 0.68.4): fall through
+  }
+}
+
 // Resolve plugin root:
-// 1. Explicit env `SKILL_CONCIERGE_ROOT`
-// 2. Sibling directory relative to this mod if inside the repo
-// 3. Fallback to standard checkout path
+// 1. Explicit env `SKILL_CONCIERGE_ROOT` — how a dev tree is driven live
+// 2. Sibling directory relative to this mod, when it still sits inside a checkout
+// 3. The pointer file install.sh wrote — how an INSTALLED copy finds its root
+// Every candidate must carry hooks/scripts/enforcer.py, so a home directory, a stale checkout
+// or a dangling pointer falls through instead of arming the mod with scripts that are not there.
 function resolvePluginRoot(): string {
-  if (process.env.SKILL_CONCIERGE_ROOT && existsSync(process.env.SKILL_CONCIERGE_ROOT)) {
-    return process.env.SKILL_CONCIERGE_ROOT;
-  }
-  const candidate = resolve(__dirname, "../..");
-  if (existsSync(join(candidate, "hooks/scripts/enforcer.py"))) {
-    return candidate;
-  }
-  const defaultPath = join(homedir(), "in-PROD/MY-WORKBENCH/skill-concierge");
-  if (existsSync(defaultPath)) {
-    return defaultPath;
-  }
-  return candidate;
+  const fromEnv = process.env.SKILL_CONCIERGE_ROOT || "";
+  if (isPluginRoot(fromEnv)) return fromEnv;
+  const sibling = resolve(__dirname, "../..");
+  if (isPluginRoot(sibling)) return sibling;
+  const fromPointer = pointerRoot();
+  if (fromPointer) return fromPointer;
+  return sibling;
 }
 
 const PLUGIN_ROOT = resolvePluginRoot();
