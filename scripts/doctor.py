@@ -1768,7 +1768,10 @@ def _commandcode_mod_resolves():
         return bool(d) and (Path(d) / "hooks" / "scripts" / "enforcer.py").is_file()
     if resolves(os.environ.get("SKILL_CONCIERGE_ROOT", "")):
         return True
-    if resolves(CCMD_MOD.parent.parent):
+    # The mod's own sibling candidate, mirrored exactly: the mod's `__dirname` is its own
+    # directory (~/.commandcode/mods), so `resolve(__dirname, "../..")` is three levels up from
+    # the FILE — file -> mods/ -> .commandcode/ -> $HOME.
+    if resolves(CCMD_MOD.parent.parent.parent):
         return True
     try:
         recorded = CCMD_ROOT_POINTER.read_text(encoding="utf-8").strip()

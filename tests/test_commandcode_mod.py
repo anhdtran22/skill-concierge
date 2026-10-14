@@ -281,6 +281,33 @@ def test_installed_copy_resolves_its_root_from_the_pointer(installed):
     assert [r["prompt"] for r in logged("enforcer.py", 1)] == ["fix the login bug"]
 
 
+def test_the_sibling_candidate_is_home_not_dot_commandcode(installed):
+    """The copy's `__dirname` is `<home>/.commandcode/mods`, so `resolve(__dirname, "../..")` is
+    `<home>`. install.sh's verify and doctor's check both mirror that derivation — this pins it
+    from the mod's side, so the two can never drift apart again."""
+    drive, logged, pointer, root, home = installed
+    (home / "hooks" / "scripts").mkdir(parents=True)
+    for name in SCRIPTS:
+        (home / "hooks" / "scripts" / name).write_text(STUB)
+    res = drive([context([user("fix the login bug")])])[0]
+    assert len(menus(res)) == 1, "the sibling candidate is <home>, two levels up from the mod's dir"
+    assert [r["prompt"] for r in logged("enforcer.py", 1)] == ["fix the login bug"]
+
+
+def test_dot_commandcode_is_not_a_sibling_candidate(installed):
+    """The off-by-one a review caught: an enforcer one level short (`<home>/.commandcode`, the
+    mod's own parent) must NOT count as a resolved root — verify and doctor used to check there
+    while the mod looked at `<home>`, which agreed in practice only because neither has the
+    file."""
+    drive, logged, pointer, root, home = installed
+    (home / ".commandcode" / "hooks" / "scripts").mkdir(parents=True)
+    for name in SCRIPTS:
+        (home / ".commandcode" / "hooks" / "scripts" / name).write_text(STUB)
+    res = drive([context([user("fix the login bug")])])[0]
+    assert menus(res) == [], "<home>/.commandcode is not the sibling candidate: no root resolves"
+    assert logged("enforcer.py") == []
+
+
 def test_the_personal_checkout_path_no_longer_arms_an_install(installed):
     """Regression pin: the pre-0.68.4 last fallback was a hardcoded
     `~/in-PROD/MY-WORKBENCH/skill-concierge`, which exists only on the maintainer's machine.

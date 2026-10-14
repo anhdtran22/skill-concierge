@@ -59,8 +59,10 @@ function pointerRoot(): string {
 // 1. Explicit env `SKILL_CONCIERGE_ROOT` — how a dev tree is driven live
 // 2. Sibling directory relative to this mod, when it still sits inside a checkout
 // 3. The pointer file install.sh wrote — how an INSTALLED copy finds its root
-// Every candidate must carry hooks/scripts/enforcer.py, so a home directory, a stale checkout
-// or a dangling pointer falls through instead of arming the mod with scripts that are not there.
+// Candidates 1-3 are accepted only when they really carry hooks/scripts/enforcer.py, so a home
+// directory, a stale checkout or a dangling pointer is skipped rather than armed. When none of
+// them qualifies the sibling path is returned anyway: every spawn below then fails its own
+// existsSync guard and the mod degrades to the fail-open no-op this file is built around.
 function resolvePluginRoot(): string {
   const fromEnv = process.env.SKILL_CONCIERGE_ROOT || "";
   if (isPluginRoot(fromEnv)) return fromEnv;

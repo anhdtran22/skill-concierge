@@ -320,13 +320,19 @@ def _resolves(d):
     return bool(d) and (Path(d) / "hooks/scripts/enforcer.py").is_file()
 
 
+# The mod's own sibling candidate, so this check mirrors the mod rather than approximating it.
+# The mod's `__dirname` is its own directory (~/.commandcode/mods), so `resolve(__dirname, "../..")`
+# is three levels up from the FILE: file -> mods/ -> .commandcode/ -> $HOME.
+mod_sibling = mod_dst.parent.parent.parent
+
+
 try:
     pointer_path = Path.home() / ".commandcode" / "skill-concierge-root"
     resolved = ""
     if _resolves(os.environ.get("SKILL_CONCIERGE_ROOT", "")):
         resolved = os.environ["SKILL_CONCIERGE_ROOT"]
-    elif _resolves(mod_dst.parent.parent):
-        resolved = str(mod_dst.parent.parent)
+    elif _resolves(mod_sibling):
+        resolved = str(mod_sibling)
     elif pointer_path.is_file():
         recorded = pointer_path.read_text(encoding="utf-8").strip()
         if _resolves(recorded):

@@ -572,6 +572,32 @@ def test_commandcode_verify_fails_when_no_root_resolves(tmp_path):
     assert "verify: FAILED" in r.stdout, r.stdout + r.stderr
 
 
+def test_commandcode_verify_accepts_the_mods_own_sibling_candidate(tmp_path):
+    """The sibling candidate is `$HOME` — three levels up from the installed FILE
+    (`<home>/.commandcode/mods/skill-concierge.ts`), because the mod's `__dirname` is its own
+    directory. Verify must accept an enforcer there, and must not look one level short at
+    `<home>/.commandcode`."""
+    root = tmp_path / "repo"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": "9.9.9"}))
+    (root / "adapters" / "commandcode").mkdir(parents=True)
+    shutil.copy(ROOT / "adapters" / "commandcode" / "skill-concierge.mod.ts",
+                root / "adapters" / "commandcode" / "skill-concierge.mod.ts")
+    (root / "bin").mkdir()
+    launcher = root / "bin" / "skill-search-mcp"
+    launcher.touch()
+    launcher.chmod(0o755)
+    home = tmp_path / "home"
+    (home / "hooks" / "scripts").mkdir(parents=True)   # the mod's sibling candidate, not .commandcode
+    (home / "hooks" / "scripts" / "enforcer.py").write_text("# enforcer fixture\n")
+
+    env = installer_env(tmp_path, home)
+    r = subprocess.run(["bash", str(INSTALL_SH["commandcode"]), "--root", str(root)],
+                        env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"mod resolves a plugin root: yes ({home})" in r.stdout, r.stdout + r.stderr
+
+
 def test_commandcode_refuses_a_malformed_settings_json_instead_of_resetting_it(tmp_path):
     root = tmp_path / "repo"
     (root / ".claude-plugin").mkdir(parents=True)
